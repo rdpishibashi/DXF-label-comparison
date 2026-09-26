@@ -11,7 +11,10 @@ from model.compare_labels import (
     compare_labels_by_region, build_region_summary_rows,
     blank_repeated_column, row_style, ROW_STYLE_COLORS,
 )
-from model.excel_output import create_compare_excel_output, create_region_compare_excel_output
+from model.excel_output import (
+    create_compare_excel_output, create_region_compare_excel_output, region_sheet_names,
+    SUMMARY_SHEET, ALL_LABELS_SHEET,
+)
 from model.drawing_filter import select_files, FILTER_OPTIONS
 from config import region_detection_config
 from view import region_selection
@@ -25,6 +28,7 @@ B_PREFIX = '[B] '
 # 比較結果（「展開図-結線図比較」実行時に生成し、「新しい比較を開始」で消す）
 _RESULT_KEYS = [
     'cmp_diff', 'cmp_summary', 'cmp_output', 'cmp_is_region_mode', 'cmp_region_metrics',
+    'cmp_preview_expanded', 'cmp_preview_sheet',
     'cmp_download_done',
 ]
 # 領域検出の状態（「領域を検出」の再実行・入力ファイルの変更・オプションOFFで消す）
@@ -267,6 +271,47 @@ def _run_comparison(named_a, named_b, filter_mode, region_mode):
     st.session_state['cmp_download_done'] = False
 
 
+def _preview_sheets(diff_df, summary):
+    """プレビュー用に、出力Excelと同じ順・同じシート名で (シート名, DataFrame|None)
+    のリストを返す（None は Summary）。比較結果シートは Excel と同じ列構成
+    （指定領域での比較時は領域ごと、『領域名』列なし）。"""
+    sheets = [(SUMMARY_SHEET, None)]
+    if st.session_state.get('cmp_is_region_mode'):
+        regions = list(st.session_state.get('cmp_region_metrics', {}))
+        for region, name in region_sheet_names(regions).items():
+            sheets.append((name, diff_df[diff_df['領域名'] == region].drop(columns='領域名')))
+    else:
+        sheets.append((ALL_LABELS_SHEET, diff_df))
+    return sheets
+
+
+def _render_preview(diff_df, summary):
+    """「比較結果プレビュー」（開閉式）: DXF-extract-labels の「抽出結果プレビュー」と
+    同じく、シートをドロップダウンで選んで表示する。開閉状態はシート選択時のみ
+    保持する（on_change。st.expander は開閉操作自体を検知できないため）。"""
+    def _mark_expanded():
+        st.session_state['cmp_preview_expanded'] = True
+
+    sheets = _preview_sheets(diff_df, summary)
+    with st.expander("比較結果プレビュー",
+                     expanded=st.session_state.get('cmp_preview_expanded', False)):
+        names = [name for name, _df in sheets]
+        selected = st.selectbox("シートを選択", names, key='cmp_preview_sheet',
+                                on_change=_mark_expanded)
+        df = dict(sheets)[selected]
+        if df is None:
+            rows = summary if isinstance(summary, list) else [
+                {'項目': k, '値': v} for k, v in summary.items()]
+            st.dataframe(_summary_for_display(rows), width='stretch', hide_index=True)
+        else:
+            st.dataframe(
+                _for_display(df).style.apply(_row_style_factory(df), axis=1),
+                width='stretch', hide_index=True,
+                # 値は Y か空欄だけなので、見出し「機器符号候補」がちょうど収まる幅に固定する
+                column_config={'機器符号候補': st.column_config.Column(width=100)},
+            )
+
+
 def _render_results_section():
     diff_df = st.session_state.get('cmp_diff')
     if diff_df is None:
@@ -285,7 +330,6 @@ def _render_results_section():
             f"A のみ: {totals.get('A のみ', 0):,}件　/　B のみ: {totals.get('B のみ', 0):,}件　/　"
             f"両方: {totals.get('両方', 0):,}件"
         )
-        st.dataframe(_summary_for_display(summary), width='stretch', hide_index=True)
     else:
         st.info(
             f"A: {summary['A ファイル数']:,}ファイル　/　"
@@ -296,12 +340,7 @@ def _render_results_section():
         )
         if summary['B 対象ファイル数'] == 0:
             st.warning("Bの対象範囲に該当するファイルがありません（Bの全ラベルが比較対象外）。")
-    st.dataframe(
-        _for_display(diff_df).style.apply(_row_style_factory(diff_df), axis=1),
-        width='stretch', hide_index=True,
-        # 値は Y か空欄だけなので、見出し「機器符号候補」がちょうど収まる幅に固定する
-        column_config={'機器符号候補': st.column_config.Column(width=100)},
-    )
+    _render_preview(diff_df, summary)
 
     download_done = st.session_state.get('cmp_download_done', False)
     downloaded = st.download_button(
