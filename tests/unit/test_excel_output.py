@@ -2,77 +2,86 @@ import io
 import os
 import sys
 
-import pandas as pd
+import openpyxl
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from model.compare_labels import (
-    compare_labels, summarize, compare_labels_by_region, build_region_summary_rows, row_style,
-    ROW_STYLE_A_ONLY, ROW_STYLE_B_ONLY, ROW_STYLE_MATCH, ROW_STYLE_MISMATCH,
+    compare_labels, summarize, summary_header, compare_labels_by_region,
+    build_region_summary_rows, COLOR_A_ONLY, COLOR_B_ONLY, COLOR_MISMATCH,
 )
-from model.excel_output import create_compare_excel_output, create_region_compare_excel_output
+from model.excel_output import (
+    create_compare_excel_output, create_region_compare_excel_output, region_sheet_names,
+)
 
 
-def test_create_compare_excel_output_sheets_and_columns():
-    df = compare_labels({'CN1': 2, 'R10': 1}, {'CN1': 5, 'X1': 1})
-    summary = summarize(df, 'A.xlsx', 'B.xlsx')
-    xlsx_bytes = create_compare_excel_output(df, summary)
-
-    xls = pd.ExcelFile(io.BytesIO(xlsx_bytes))
-    assert xls.sheet_names == ['サマリー', '差分']
-    diff = xls.parse('差分')
-    assert list(diff.columns) == ['ラベル', '区分', 'A個数', 'B個数']
-    assert len(diff) == len(df)
-    # A のみのラベル(R10)はB個数が空欄(NaN)
-    r10 = diff[diff['ラベル'] == 'R10'].iloc[0]
-    assert pd.isna(r10['B個数'])
+def _load(data):
+    return openpyxl.load_workbook(io.BytesIO(data))
 
 
-def test_create_compare_excel_output_row_styles_cover_all_combinations():
-    # 区分×個数一致/不一致の組み合わせが全て1つのdiff_dfに現れることを確認する
-    # （青=Aのみ・緑=Bのみ・黄=両方だが個数不一致・無色=両方かつ個数一致）。
-    # Excel自体のセル色はxlsxwriterの書式でopenpyxl読み込み時には検証できないため、
-    # ここでは compare_excel_output が例外なく全区分を書き出せることと、
-    # row_style() が各行に期待どおりの表示区分を割り当てることを確認する。
-    df = compare_labels(
-        {'MATCH': 3, 'MISMATCH': 1, 'A_ONLY': 2},
-        {'MATCH': 3, 'MISMATCH': 99, 'B_ONLY': 5},
-    )
-    summary = summarize(df, 'A.xlsx', 'B.xlsx')
-    xlsx_bytes = create_compare_excel_output(df, summary)
-    xls = pd.ExcelFile(io.BytesIO(xlsx_bytes))
-    diff = xls.parse('差分')
-    assert len(diff) == 4
-
-    styles = {
-        row['ラベル']: row_style(row['区分'], row['A個数'], row['B個数'])
-        for _, row in diff.iterrows()
-    }
-    assert styles['A_ONLY'] == ROW_STYLE_A_ONLY
-    assert styles['B_ONLY'] == ROW_STYLE_B_ONLY
-    assert styles['MATCH'] == ROW_STYLE_MATCH
-    assert styles['MISMATCH'] == ROW_STYLE_MISMATCH
+def _values(ws):
+    return [[c.value for c in row] for row in ws.iter_rows()]
 
 
-def test_create_region_compare_excel_output_sheets_and_columns():
-    a_by_region = {'R1': {'CN1': 2, 'R10': 1}}
-    b_by_region = {'R1': {'CN1': 5, 'X1': 1}}
-    diff_df, metrics = compare_labels_by_region(a_by_region, b_by_region, ['R1'])
-    summary_rows = build_region_summary_rows(metrics, 'A.xlsx', 'B.xlsx', b_filter_mode='全部')
+def test_sheet_names_and_columns():
+    """シート名は Summary → All Labels diff、比較結果の列に機器符号候補を含む。"""
+    df = compare_labels({'CB1': 1}, {'CB1': 1, '電源': 2})
+    wb = _load(create_compare_excel_output(df, summarize(df, summary_header(1, 1, '全部', 1))))
+    assert wb.sheetnames == ['Summary', 'All Labels diff']
+    rows = _values(wb['All Labels diff'])
+    assert rows[0] == ['機器符号候補', 'ラベル', '区分', 'A個数', 'B個数']
+    assert rows[1] == ['Y', 'CB1', '両方', 1, 1]
+    assert rows[2] == [None, '電源', 'B のみ', None, 2]
 
-    xlsx_bytes = create_region_compare_excel_output(diff_df, summary_rows)
-    xls = pd.ExcelFile(io.BytesIO(xlsx_bytes))
-    assert xls.sheet_names == ['サマリー', '差分']
 
-    diff = xls.parse('差分')
-    assert list(diff.columns) == ['領域名', 'ラベル', '区分', 'A個数', 'B個数']
-    # 同じ領域名が連続する行は2行目以降が空欄になる（先頭行だけ'R1'）
-    assert diff.iloc[0]['領域名'] == 'R1'
-    assert diff['領域名'].iloc[1:].isna().all()
+def test_summary_numbers_use_thousands_separator():
+    """Summary の数値セルは数値型のまま #,##0 書式、文字列はそのまま。"""
+    df = compare_labels({f'L{i}': 1 for i in range(1234)}, {})
+    wb = _load(create_compare_excel_output(df, summarize(df, summary_header(1, 2, '全部', 2))))
+    ws = wb['Summary']
+    cells = {ws.cell(r, 1).value: ws.cell(r, 2) for r in range(2, ws.max_row + 1)}
+    assert cells['A ユニークラベル数'].value == 1234
+    assert cells['A ユニークラベル数'].number_format == '#,##0'
+    assert cells['B 絞り込み条件'].value == '全部'
 
-    summ = xls.parse('サマリー')
-    assert list(summ.columns) == ['領域名', '項目', '値']
-    assert summ.iloc[0]['項目'] == 'A ファイル名'
-    assert pd.isna(summ.iloc[0]['領域名'])  # ヘッダー行は領域名が空欄
-    assert summ.iloc[3]['領域名'] == 'R1'  # 領域ブロックの先頭行だけ領域名が入る
-    assert summ['領域名'].iloc[4:8].isna().all()
+
+def test_row_colors():
+    """行の塗り: Aのみ=青／Bのみ=緑／両方で個数不一致=黄／一致=無色。"""
+    df = compare_labels({'A1': 1, 'M': 1, 'X': 1}, {'B1': 1, 'M': 1, 'X': 2})
+    wb = _load(create_compare_excel_output(df, summarize(df, summary_header(1, 1, '全部', 1))))
+    ws = wb['All Labels diff']
+    fills = {ws.cell(r, 2).value: ws.cell(r, 2).fill.fgColor.rgb for r in range(2, ws.max_row + 1)}
+    assert fills['A1'].endswith(COLOR_A_ONLY['bg_color'][1:])
+    assert fills['B1'].endswith(COLOR_B_ONLY['bg_color'][1:])
+    assert fills['X'].endswith(COLOR_MISMATCH['bg_color'][1:])
+    assert fills['M'] in (None, '00000000')
+
+
+def test_region_output_one_sheet_per_region():
+    """指定領域での比較: 領域ごとのシート（シート名＝領域名、regions の順、領域名列なし）。
+    該当ラベルが無い領域もヘッダーのみのシートとして出す。Summary は3列。"""
+    regions = ['R2', 'SYSTEM I/F BOX', 'EMPTY']
+    df, metrics = compare_labels_by_region(
+        {'R2': {'A': 1, 'B': 1}, 'SYSTEM I/F BOX': {'CB1': 1}},
+        {'R2': {'A': 1}}, regions)
+    summary = build_region_summary_rows(metrics, summary_header(1, 1, '全部', 1))
+    wb = _load(create_region_compare_excel_output(df, summary, regions))
+    assert wb.sheetnames == ['Summary', 'R2', 'SYSTEM I_F BOX', 'EMPTY']
+    assert _values(wb['Summary'])[0] == ['領域名', '項目', '値']
+    header = ['機器符号候補', 'ラベル', '区分', 'A個数', 'B個数']
+    r2 = _values(wb['R2'])
+    assert r2[0] == header and [r[1] for r in r2[1:]] == ['A', 'B']
+    assert [r[1] for r in _values(wb['SYSTEM I_F BOX'])[1:]] == ['CB1']
+    assert _values(wb['EMPTY']) == [header]
+
+
+def test_region_sheet_names_sanitize_truncate_and_dedupe():
+    """Excelで使えない文字は '_'、31文字に切り詰め、Summary・他シートと重複すれば (2)…。"""
+    names = region_sheet_names(
+        ['SYSTEM I/F BOX', 'NXSAF ** (NX-ECC202)', 'summary', 'X:Y', 'X?Y', 'A' * 40])
+    assert names['SYSTEM I/F BOX'] == 'SYSTEM I_F BOX'
+    assert names['NXSAF ** (NX-ECC202)'] == 'NXSAF __ (NX-ECC202)'
+    assert names['summary'] == 'summary(2)'
+    assert (names['X:Y'], names['X?Y']) == ('X_Y', 'X_Y(2)')
+    assert names['A' * 40] == 'A' * 31
+    assert all(len(n) <= 31 for n in names.values())
