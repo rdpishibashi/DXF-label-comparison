@@ -133,8 +133,9 @@ def _render_intro():
             "",
             "**Excelファイルの内容：**",
             "- Summaryシート：ファイル数・Bの絞り込み条件・比較件数（指定領域での比較時は領域ごと）",
-            "- 比較結果シート：機器符号候補・ラベル・区分（Aのみ/Bのみ/両方）・A個数・B個数"
-            "（指定領域での比較時は先頭に領域名）",
+            "- All Labels diffシート：機器符号候補・ラベル・区分（Aのみ/Bのみ/両方）・A個数・B個数",
+            "- 指定領域での比較時は、All Labels diffシートの代わりに領域ごとのシート"
+            "（シート名＝領域名。Excelで使えない文字 \\ / * ? : [ ] は _ に置換）",
         ]))
 
 
@@ -252,7 +253,7 @@ def _run_comparison(named_a, named_b, filter_mode, region_mode):
             aggregate_region_labels(results, a_keys, regions),
             aggregate_region_labels(results, b_keys, regions), regions)
         summary = build_region_summary_rows(metrics, header)
-        output = create_region_compare_excel_output(diff_df, summary)
+        output = create_region_compare_excel_output(diff_df, summary, regions)
         st.session_state['cmp_region_metrics'] = metrics
     else:
         diff_df = compare_labels(aggregate_labels(results, a_keys),
@@ -298,6 +299,8 @@ def _render_results_section():
     st.dataframe(
         _for_display(diff_df).style.apply(_row_style_factory(diff_df), axis=1),
         width='stretch', hide_index=True,
+        # 値は Y か空欄だけなので、見出し「機器符号候補」がちょうど収まる幅に固定する
+        column_config={'機器符号候補': st.column_config.Column(width=100)},
     )
 
     download_done = st.session_state.get('cmp_download_done', False)

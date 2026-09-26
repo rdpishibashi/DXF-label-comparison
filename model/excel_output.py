@@ -1,41 +1,71 @@
 """比較結果の Excel 出力モジュール。
 
-シート構成: Summary → 比較結果。
+シート構成:
+- 通常: Summary → All Labels diff
+- 指定領域での比較: Summary → 領域ごとのシート（シート名＝領域名。Excel で使えない
+  文字は '_' に置換・31文字に切り詰め・重複時は '(2)' 等を付与。`region_sheet_names()`）
+
 - Summary: 項目・値（指定領域での比較時は 領域名・項目・値）。数値は3桁区切り（#,##0）
-- 比較結果: [領域名]・機器符号候補・ラベル・区分・A個数・B個数。表示スタイル区分
+- 比較結果シート: 機器符号候補・ラベル・区分・A個数・B個数。表示スタイル区分
   （青=Aのみ／緑=Bのみ／黄=両方だが個数不一致／無色=両方かつ個数一致）ごとに
   行全体を色分けする（`model.compare_labels.row_style()`）
 """
 import io
 import numbers
+import re
 
 import pandas as pd
 
-from model.compare_labels import (
-    DIFF_COLUMNS, REGION_DIFF_COLUMNS, blank_repeated_column, row_style, ROW_STYLE_COLORS,
-)
+from model.compare_labels import DIFF_COLUMNS, row_style, ROW_STYLE_COLORS
 
 SUMMARY_SHEET = 'Summary'
-DIFF_SHEET = '比較結果'
+ALL_LABELS_SHEET = 'All Labels diff'
 NUMBER_FORMAT = '#,##0'
+_INVALID_SHEET_CHARS = re.compile(r'[\\/*?:\[\]]')
+_MAX_SHEET_NAME = 31
+
+
+def region_sheet_names(regions) -> dict:
+    """{領域名: シート名} を返す（regions の順）。Excel のシート名に使えない文字
+    （\\ / * ? : [ ]）は '_' に置換し、31文字に切り詰める。Summary や他の領域と
+    （大文字小文字を区別せず）重複する場合は末尾に '(2)'・'(3)'… を付ける。"""
+    used = {SUMMARY_SHEET.lower()}
+    names = {}
+    for region in regions:
+        base = _INVALID_SHEET_CHARS.sub('_', str(region)).strip("'") or '_'
+        name = base[:_MAX_SHEET_NAME]
+        n = 2
+        while name.lower() in used:
+            suffix = f'({n})'
+            name = base[:_MAX_SHEET_NAME - len(suffix)] + suffix
+            n += 1
+        used.add(name.lower())
+        names[region] = name
+    return names
 
 
 def create_compare_excel_output(diff_df: pd.DataFrame, summary: dict) -> bytes:
-    """通常の比較結果の Excel ファイルを bytes で返す（Summary は 項目・値 の2列）。"""
+    """通常の比較結果の Excel ファイルを bytes で返す（Summary は 項目・値 の2列、
+    比較結果は 'All Labels diff' シート）。"""
     summary_rows = [{'項目': k, '値': v} for k, v in summary.items()]
-    return _create_excel_output(diff_df, summary_rows, DIFF_COLUMNS)
+    return _create_excel_output(summary_rows, [(ALL_LABELS_SHEET, diff_df)])
 
 
-def create_region_compare_excel_output(diff_df: pd.DataFrame, summary_rows: list) -> bytes:
+def create_region_compare_excel_output(diff_df: pd.DataFrame, summary_rows: list,
+                                       regions: list) -> bytes:
     """指定領域での比較結果の Excel ファイルを bytes で返す。
 
-    比較結果シートの先頭に『領域名』列（`REGION_DIFF_COLUMNS`）を持ち、Summary シートは
-    領域名・項目・値の3列（`build_region_summary_rows()` の戻り値をそのまま渡す）。
+    `diff_df` は `compare_labels_by_region()` の戻り値（『領域名』列付き）。
+    `regions` の順に領域ごとのシート（シート名は `region_sheet_names()`、『領域名』列は
+    持たない）を作る。該当ラベルが無い領域もヘッダーのみのシートとして出力する。
+    Summary シートは領域名・項目・値の3列（`build_region_summary_rows()` の戻り値）。
     """
-    return _create_excel_output(diff_df, summary_rows, REGION_DIFF_COLUMNS)
+    names = region_sheet_names(regions)
+    sheets = [(names[region], diff_df[diff_df['領域名'] == region]) for region in regions]
+    return _create_excel_output(summary_rows, sheets)
 
 
-def _create_excel_output(diff_df: pd.DataFrame, summary_rows: list, diff_columns: list) -> bytes:
+def _create_excel_output(summary_rows: list, diff_sheets: list) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
@@ -55,8 +85,9 @@ def _create_excel_output(diff_df: pd.DataFrame, summary_rows: list, diff_columns
         }
 
         _write_summary_sheet(workbook, writer, summary_rows, header_fmt, number_fmt)
-        _write_diff_sheet(workbook, writer, diff_df, diff_columns, header_fmt,
-                          row_formats, row_number_formats)
+        for sheet_name, df in diff_sheets:
+            _write_diff_sheet(workbook, writer, sheet_name, df, header_fmt,
+                              row_formats, row_number_formats)
 
     return output.getvalue()
 
@@ -88,15 +119,11 @@ def _write_summary_sheet(workbook, writer, summary_rows: list, header_fmt, numbe
     ws.freeze_panes(1, 0)
 
 
-def _write_diff_sheet(workbook, writer, diff_df: pd.DataFrame, columns: list, header_fmt,
+def _write_diff_sheet(workbook, writer, sheet_name, diff_df: pd.DataFrame, header_fmt,
                       row_formats, row_number_formats):
-    ws = workbook.add_worksheet(DIFF_SHEET)
-    writer.sheets[DIFF_SHEET] = ws
-
-    if '領域名' in columns:
-        # 同じ領域名が連続する行では2行目以降を空欄にする（Summary シートと
-        # 同じ「見出し1回＋空欄」レイアウト、ユーザー指定）
-        diff_df = blank_repeated_column(diff_df, '領域名')
+    columns = DIFF_COLUMNS
+    ws = workbook.add_worksheet(sheet_name)
+    writer.sheets[sheet_name] = ws
 
     for col_idx, col_name in enumerate(columns):
         ws.write(0, col_idx, col_name, header_fmt)
@@ -120,7 +147,7 @@ def _write_diff_sheet(workbook, writer, diff_df: pd.DataFrame, columns: list, he
             else:
                 ws.write(row_idx, col_idx, value, fmt)
 
-    widths = {'領域名': 25, '機器符号候補': 12, 'ラベル': 30, '区分': 12, 'A個数': 10, 'B個数': 10}
+    widths = {'機器符号候補': 12, 'ラベル': 30, '区分': 12, 'A個数': 10, 'B個数': 10}
     for col_idx, col_name in enumerate(columns):
         ws.set_column(col_idx, col_idx, widths[col_name])
     ws.freeze_panes(1, 0)
