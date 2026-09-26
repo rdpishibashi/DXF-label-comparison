@@ -1,121 +1,43 @@
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+import pytest
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from model.drawing_filter import (
-    select_drawing_numbers, aggregate_filtered_rows, aggregate_region_rows,
+    select_files, is_unit_wiring_title,
     FILTER_UNIT_ONLY, FILTER_UNIT_EXCLUDED, FILTER_ALL,
 )
 
-
-TITLE_MAP = {
-    'EE1': 'ＵＮＩＴ内結線図',   # 全角UNIT
-    'EE2': 'UNIT内結線図',       # 半角UNIT
-    'EE3': '展開接続図',         # 非UNIT
-    'EE4': '',                   # タイトル空欄
+TITLES = {
+    'b1': 'UNIT内結線図',
+    'b2': 'ＵＮＩＴ内結線図',
+    'b3': '部品図',
+    'b4': None,
+    'b5': 'UNIT内結線図 ',
 }
 
 
-def test_select_unit_only_matches_both_fullwidth_and_halfwidth():
-    result = select_drawing_numbers(TITLE_MAP, FILTER_UNIT_ONLY)
-    assert result == {'EE1', 'EE2'}
+def test_unit_only_matches_fullwidth_and_halfwidth():
+    """全角・半角・前後空白の違いは同じタイトルとして扱う。"""
+    assert select_files(TITLES, FILTER_UNIT_ONLY) == ['b1', 'b2', 'b5']
 
 
-def test_select_unit_excluded_includes_non_unit_and_blank_title():
-    result = select_drawing_numbers(TITLE_MAP, FILTER_UNIT_EXCLUDED)
-    assert result == {'EE3', 'EE4'}
+def test_unit_excluded_includes_blank_title():
+    """タイトル空欄（未抽出）は『UNIT内結線図以外』に入る。"""
+    assert select_files(TITLES, FILTER_UNIT_EXCLUDED) == ['b3', 'b4']
 
 
-def test_select_all_returns_none():
-    result = select_drawing_numbers(TITLE_MAP, FILTER_ALL)
-    assert result is None
+def test_all_returns_every_key_in_order():
+    assert select_files(TITLES, FILTER_ALL) == ['b1', 'b2', 'b3', 'b4', 'b5']
 
 
-def test_select_invalid_mode_raises():
-    import pytest
+def test_partial_title_is_not_unit_wiring():
+    """完全一致のみ（『UNIT内結線図(1)』等の部分一致は対象外、従来仕様どおり）。"""
+    assert not is_unit_wiring_title('UNIT内結線図(1)')
+
+
+def test_invalid_mode_raises():
     with pytest.raises(ValueError):
-        select_drawing_numbers(TITLE_MAP, '不明なモード')
-
-
-def test_aggregate_filtered_rows_with_selection():
-    rows = [
-        ('CN1', 5, ['EE1', 'EE3']),  # UNIT(EE1) と 非UNIT(EE3) の両方に出現
-        ('R10', 2, ['EE3']),          # 非UNITのみ
-        ('X1', 1, ['EE1']),           # UNITのみ
-        ('Y1', 3, []),                 # 図番情報なし
-    ]
-    selected = {'EE1', 'EE2'}  # UNIT内結線図のみ選択時
-    result = aggregate_filtered_rows(rows, selected)
-    # CN1: EE1が選択集合に含まれるため対象。R10: EE3のみで対象外。
-    # X1: EE1が対象。Y1: 図番リストが空のため対象外。
-    assert result == {'CN1': 5, 'X1': 1}
-
-
-def test_aggregate_filtered_rows_excluded_mode():
-    rows = [
-        ('CN1', 5, ['EE1', 'EE3']),
-        ('R10', 2, ['EE3']),
-        ('X1', 1, ['EE1']),
-    ]
-    selected = {'EE3', 'EE4'}  # UNIT内結線図以外選択時
-    result = aggregate_filtered_rows(rows, selected)
-    assert result == {'CN1': 5, 'R10': 2}
-
-
-def test_aggregate_filtered_rows_none_selection_includes_all():
-    rows = [
-        ('CN1', 5, ['EE1']),
-        ('R10', 2, []),
-    ]
-    result = aggregate_filtered_rows(rows, None)
-    assert result == {'CN1': 5, 'R10': 2}
-
-
-def test_aggregate_filtered_rows_sums_duplicate_labels():
-    rows = [
-        ('CN1', 2, ['EE1']),
-        ('CN1', 3, ['EE2']),
-    ]
-    selected = {'EE1', 'EE2'}
-    result = aggregate_filtered_rows(rows, selected)
-    assert result == {'CN1': 5}
-
-
-def test_aggregate_region_rows_groups_by_region_and_filters():
-    rows = [
-        ('R1', 'CN1', 5, ['EE1', 'EE3']),  # UNIT(EE1)と非UNIT(EE3)の両方
-        ('R1', 'R10', 2, ['EE3']),          # 非UNITのみ
-        ('R2', 'X1', 1, ['EE1']),           # 別領域、UNITのみ
-    ]
-    selected = {'EE1', 'EE2'}  # UNIT内結線図のみ選択時
-    result = aggregate_region_rows(rows, selected)
-    assert result == {'R1': {'CN1': 5}, 'R2': {'X1': 1}}
-
-
-def test_aggregate_region_rows_none_selection_includes_all():
-    rows = [
-        ('R1', 'CN1', 5, ['EE1']),
-        ('R1', 'R10', 2, []),
-    ]
-    result = aggregate_region_rows(rows, None)
-    assert result == {'R1': {'CN1': 5, 'R10': 2}}
-
-
-def test_aggregate_region_rows_sums_duplicate_label_within_same_region():
-    rows = [
-        ('R1', 'CN1', 2, ['EE1']),
-        ('R1', 'CN1', 3, ['EE2']),
-    ]
-    result = aggregate_region_rows(rows, {'EE1', 'EE2'})
-    assert result == {'R1': {'CN1': 5}}
-
-
-def test_aggregate_region_rows_same_label_kept_separate_across_regions():
-    # 同じラベルが複数領域に属す場合、各領域で独立して集計される
-    rows = [
-        ('R1', 'CN1', 3, ['EE1']),
-        ('R2', 'CN1', 7, ['EE1']),
-    ]
-    result = aggregate_region_rows(rows, None)
-    assert result == {'R1': {'CN1': 3}, 'R2': {'CN1': 7}}
+        select_files(TITLES, 'xxx')
