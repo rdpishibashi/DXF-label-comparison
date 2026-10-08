@@ -1017,6 +1017,14 @@ def _is_valid_name_candidate(t, min_letters, exclude_lowercase, exclude_terms,
     # （例 "TMP (TMP-1003LM)"）は対象外。
     if up.strip().startswith('('):
         return False
+    # 矩形領域名称は英大文字で始まる語であることを要求する（2026-10 ユーザー
+    # 指示）。長い日本語の注記文（例: "注1) MD SHUTTER I/F B.Dの接地方法
+    # （ノイズ対策)について..."）が、既存の除外語（'NOTE'・'☆'）に引っかから
+    # ないまま領域名候補に混入する不具合の対策。長さによる制限は設けない
+    # （"MD SHUTTER I/F B.D-Ⅵ" のような長い正当な名称は除外しないため）。
+    stripped = up.strip()
+    if not stripped or not ('A' <= stripped[0] <= 'Z'):
+        return False
     if any(term.upper() in up for term in (exclude_terms or ())):
         return False
     if exclude_circuit_symbols and not any(k.upper() in up for k in (circuit_keep_terms or ())):
