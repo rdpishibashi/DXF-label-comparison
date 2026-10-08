@@ -12,7 +12,10 @@ DXF-label-comparison にバイト一致のコピーがあり、同プロジェ�
   - `region_analyses`: {ファイルキー: 解析結果}（`run_region_detection()` の戻り値を
     呼び出し側が格納する。ファイルキーは呼び出し側が決める一意な文字列）
   - `region_selection_confirmed`: 「領域選択を完了」済みか
-  - `grc_<名称>`: 「領域一覧」のチェック状態
+  - `grc_<名称>`: 「領域一覧」の「特定」チェック状態
+  - `gre_<名称>`: 「領域一覧」の「除外」チェック状態（v3.11.0新設。
+    `allow_exclude=False` の呼び出し側〈DXF-label-comparison〉では列自体を
+    表示しないため、常に空）
   - `rc_<ファイルキー>_<領域id>_<i>` / `rc_<ファイルキー>_<領域id>_none`:
     「領域の確認」のチェック状態
 """
@@ -20,9 +23,10 @@ import contextlib
 import os
 import time
 
+import pandas as pd
 import streamlit as st
 
-from model.common_utils import save_uploadedfile
+from model.common_utils import save_uploadedfile, normalize_width
 from model.region_detector import (
     DEFAULT_REGION_CONFIG, regions_overlap,
     resolve_globally_decided_name, is_region_pending_selection,
@@ -32,7 +36,7 @@ from model.extraction_pipeline import detect_file_regions, extract_file_data
 
 ANALYSES_KEY = 'region_analyses'
 CONFIRMED_KEY = 'region_selection_confirmed'
-SELECTION_KEY_PREFIXES = ('rc_', 'grc_')
+SELECTION_KEY_PREFIXES = ('rc_', 'grc_', 'gre_')
 
 # 図面枠が見つからない場合に `analyze_dxf_regions()` が返すエラーメッセージ
 # （`region_detector.py` 側の文言）に含まれる識別文字列。このケースは既知の
@@ -130,7 +134,7 @@ def run_label_extraction(named_files, frame_lineweight, analyses=None,
 
 
 def global_checked_region_names():
-    """「領域一覧」のチェックボックス（`grc_<name>`）からチェック済みの
+    """「領域一覧」の「特定」チェックボックス（`grc_<name>`）からチェック済みの
     領域名の集合を返す。個々のチェックボックスは `render_global_region_names_section()`
     が描画する（`st.multiselect` ではなく個別チェックボックスにしたのは、
     ポップアップに隠れず全候補を一覧できるようにするため、2026-07-30）。"""
@@ -139,6 +143,29 @@ def global_checked_region_names():
         k[len(prefix):] for k, v in st.session_state.items()
         if isinstance(k, str) and k.startswith(prefix) and v
     }
+
+
+def global_excluded_region_names():
+    """「領域一覧」の「除外」チェックボックス（`gre_<name>`）からチェック済みの
+    領域名の集合を返す（v3.11.0新設）。`allow_exclude=False` で描画した場合は
+    `gre_` キー自体が作られないため、常に空集合になる。"""
+    prefix = 'gre_'
+    return {
+        k[len(prefix):] for k, v in st.session_state.items()
+        if isinstance(k, str) and k.startswith(prefix) and v
+    }
+
+
+def _region_excluded(reg, excluded_names):
+    """この領域の名称候補のいずれかが「除外」指定されているかを判定する
+    （`model.ref_designator.excluded_region_ids()` と同じ正規化規約。
+    v3.11.0新設。候補が0件の無名領域は対象外——決定9「無名領域は除外対象外」）。"""
+    if not excluded_names:
+        return False
+    return any(
+        normalize_width(text) in excluded_names
+        for (_dist, text) in reg.get('name_candidates', [])
+    )
 
 
 def gather_name_selections(fname, analysis):
@@ -150,10 +177,19 @@ def gather_name_selections(fname, analysis):
     領域はここでは何も返さない（無所属のまま。候補が元々0件の無名領域は
     呼び出し先の `ref_designator.build_named_regions()` 等が自動 "no name"
     命名を行う）。
+
+    「除外」指定された領域はここでは一切名称を決定しない（v3.11.0新設）。
+    除外領域のラベルは `ref_designator.filter_labels_outside_excluded()` に
+    よって名称採用の有無とは無関係に出力から取り除かれるため、ここで名称を
+    決定しても最終結果には影響しないが、「除外は名称採用の判断自体をしない」
+    という仕様を明確にするため、あえて候補走査の対象外にする。
     """
     checked_names = global_checked_region_names()
+    excluded_names = global_excluded_region_names()
     name_selections = {}
     for reg in analysis.get('regions', []):
+        if _region_excluded(reg, excluded_names):
+            continue
         decided = resolve_globally_decided_name(reg, checked_names)
         if decided is not None:
             name_selections[(fname, reg['id'])] = [decided]
@@ -394,20 +430,28 @@ def invalidate_region_selection_confirmation():
     st.session_state[CONFIRMED_KEY] = False
 
 
-def render_global_region_names_section(candidate_names, locked, action='抽出'):
+def render_global_region_names_section(candidate_names, locked, action='抽出', allow_exclude=False):
     """「領域一覧」セクション: `candidate_names`（呼び出し側が決める名称候補の
-    一覧。表示順のまま使う）を表示し、`action`（「抽出」「比較」等）したい
-    領域名にチェックを入れさせる（複数選択可）。「領域選択を完了」ボタンを
-    押すまでは「領域の確認」と後続の実行ボタンは表示されない（呼び出し側が
+    一覧。表示順のまま使う）を表(st.data_editor)で表示し、領域名ごとに「特定」
+    （`allow_exclude=True` のときはさらに「除外」）をON/OFFさせる
+    （v3.11.0、チェックボックス個別表示から表形式に変更）。「領域選択を完了」
+    ボタンを押すまでは「領域の確認」と後続の実行ボタンは表示されない（呼び出し側が
     `region_selection_confirmed` を見て判定する）。
 
-    チェック済み候補が「ちょうど1件」の領域は、その名称で自動的に決定される。
-    チェック済み候補が「2件以上」残る領域だけが「領域の確認」での個別選択の
-    対象になる（どれを採用するかは候補どうしが競合しているため個別に選ばせる）。
-    チェック済み候補が「0件」の領域は、自動的に除外され「領域の確認」にも
-    表示されない（未チェック＝対象にしないという意思表示のため）。候補1件の
-    領域も同様に、この一覧でのチェックが対象にするかどうかの唯一のゲートになる
-    （2026-07-30 ユーザー指定で確定した仕様）。
+    **特定**: 従来通りの振る舞い。チェック済み候補が「ちょうど1件」の領域は、
+    その名称で自動的に決定される。チェック済み候補が「2件以上」残る領域だけが
+    「領域の確認」での個別選択の対象になる（どれを採用するかは候補どうしが
+    競合しているため個別に選ばせる）。チェック済み候補が「0件」の領域は、
+    自動的に除外され「領域の確認」にも表示されない（未チェック＝対象にしないという
+    意思表示のため）。候補1件の領域も同様に、この一覧でのチェックが対象にするか
+    どうかの唯一のゲートになる（2026-07-30 ユーザー指定で確定した仕様）。
+
+    **除外**（`allow_exclude=True` のときのみ列を表示。v3.11.0新設）: この領域
+    （境界線上を含む）の内側にあるラベルを出力結果から完全に取り除く。
+    「特定」の有無とは無関係にラベル自体が出力から消える。同じ領域名で「特定」
+    「除外」の両方をONにした場合は「除外」が優先される（2026-10-08ユーザー決定）。
+    `allow_exclude=False`（例: DXF-label-comparison）のときは「除外」列自体を
+    表示しない。
 
     `candidate_names` が空の場合は案内メッセージのみ表示する（面積条件〈config.py
     の area_ratio / group_area_ratio〉を満たす領域が1件も無かった、または
@@ -418,30 +462,74 @@ def render_global_region_names_section(candidate_names, locked, action='抽出')
         return
 
     st.subheader("領域一覧")
-    st.caption(
-        "検出された全ファイル・全領域の名称候補（複数候補を持つ領域も含む）を"
-        f"重複なく一覧表示しています。{action}したい領域名にチェックを入れてください"
-        f"（複数選択可）。ある領域のチェック済み候補がちょうど1件なら、その名称で"
-        f"自動的に{action}されます。チェック済み候補が2件以上残る領域のみ、"
-        "「領域選択を完了」を押した後に表示される「領域の確認」でどれを採用するか"
-        f"個別に選択してください。候補を1つもチェックしなかった領域は{action}されません"
-        "（「領域の確認」にも表示されません）。"
+    if allow_exclude:
+        st.caption(
+            "検出された全ファイル・全領域の名称候補（複数候補を持つ領域も含む）を"
+            "重複なく一覧表示しています。「特定」は従来通り、その名称でこの領域を"
+            f"{action}対象として採用します（候補が2件以上チェックされた領域のみ、"
+            "「領域選択を完了」を押した後に表示される「領域の確認」でどれを採用するか"
+            "個別に選択してください。候補を1つも「特定」しなかった領域は、"
+            f"単に名称が採用されないだけで、領域内のラベルはそのまま{action}結果に"
+            "残ります）。「除外」はこの領域（境界線上を含む）の内側にあるラベルを"
+            f"{action}結果から完全に取り除きます（「特定」の有無とは無関係に、"
+            "ラベル自体が出力から消えます）。同じ領域名で両方チェックした場合は"
+            "「除外」が優先されます。"
+        )
+    else:
+        st.caption(
+            "検出された全ファイル・全領域の名称候補（複数候補を持つ領域も含む）を"
+            f"重複なく一覧表示しています。{action}したい領域名の「特定」にチェックを"
+            f"入れてください（複数選択可）。ある領域のチェック済み候補がちょうど1件なら、"
+            f"その名称で自動的に{action}されます。チェック済み候補が2件以上残る領域のみ、"
+            "「領域選択を完了」を押した後に表示される「領域の確認」でどれを採用するか"
+            "個別に選択してください。候補を1つも「特定」しなかった領域は、"
+            f"単に名称が採用されないだけで、領域内のラベルはそのまま{action}結果に残ります"
+            "（「領域の確認」にも表示されません）。"
+        )
+
+    # data_editor とのライブ連動は「正本dict + キー再生成」方式を使う
+    # （streamlitスキル§6参照）——表示中のdata_editorのsession_stateを直接
+    # 書き換えると無限同期ループで画面が固まるため、差分検出時は正本
+    # （`grc_<name>`/`gre_<name>`）を更新してキーのバージョンを上げ、
+    # 別ウィジェットとして再生成する。
+    for name in candidate_names:
+        st.session_state.setdefault(f"grc_{name}", False)
+        if allow_exclude:
+            st.session_state.setdefault(f"gre_{name}", False)
+
+    rows = []
+    for name in candidate_names:
+        row = {'領域名': name, '特定': bool(st.session_state[f"grc_{name}"])}
+        if allow_exclude:
+            row['除外'] = bool(st.session_state[f"gre_{name}"])
+        rows.append(row)
+    df = pd.DataFrame(rows).set_index('領域名')
+
+    column_config = {'特定': st.column_config.CheckboxColumn('特定')}
+    if allow_exclude:
+        column_config['除外'] = st.column_config.CheckboxColumn('除外')
+
+    ver = st.session_state.get('grc_editor_ver', 0)
+    edited = st.data_editor(
+        df, key=f"grc_editor_{ver}", disabled=locked,
+        column_config=column_config,
     )
-    # ポップアップに隠さず全候補を一覧できるよう、st.multiselect ではなく
-    # チェックボックスを使う。st.container(horizontal=True) はflexboxで
-    # 子要素（チェックボックスは既定 width='content' で自身のラベル幅にしか
-    # 広がらない）を横に並べ、ブラウザー幅に収まらない分は自動的に折り返す
-    # ため、指定した列数無しでもブラウザー幅に応じた2〜4段組相当のレスポンシブ
-    # 表示になる。
-    with st.container(horizontal=True):
-        for name in candidate_names:
-            ck = f"grc_{name}"
-            if ck not in st.session_state:
-                st.session_state[ck] = False
-            st.checkbox(
-                name, key=ck, disabled=locked,
-                on_change=invalidate_region_selection_confirmation,
-            )
+
+    deltas = []
+    for name in candidate_names:
+        new_spec = bool(edited.loc[name, '特定'])
+        if new_spec != st.session_state[f"grc_{name}"]:
+            deltas.append((f"grc_{name}", new_spec))
+        if allow_exclude:
+            new_excl = bool(edited.loc[name, '除外'])
+            if new_excl != st.session_state[f"gre_{name}"]:
+                deltas.append((f"gre_{name}", new_excl))
+    if deltas:
+        for key, val in deltas:
+            st.session_state[key] = val
+        invalidate_region_selection_confirmation()
+        st.session_state['grc_editor_ver'] = ver + 1
+        st.rerun()
 
     # 「領域選択を完了」: 確定済みなら非表示にする（「領域を検出」ボタンと同じ
     # パターン——役目を終えたら消え、チェックを変更すると
@@ -462,9 +550,11 @@ def region_confirmation_targets(analyses, checked_names):
         0件でも、エラー自体をユーザーに見せる必要があるため対象に含める）
 
     図面枠が見つからない既知の未対応ケース（`FRAME_NOT_FOUND_ERROR_MARKER`）
-    は対象から除く。戻り値はファイルキーでソートした
-    `[(fname, analysis, pending_regions), ...]`。
+    は対象から除く。「除外」指定された領域は要選択候補の数に関わらず対象から
+    除く（v3.11.0新設。§4決定2「除外領域は領域の確認に表示しない」）。
+    戻り値はファイルキーでソートした `[(fname, analysis, pending_regions), ...]`。
     """
+    excluded_names = global_excluded_region_names()
     targets = []
     for fname, analysis in sorted(analyses.items()):
         err = analysis.get('error')
@@ -472,7 +562,9 @@ def region_confirmation_targets(analyses, checked_names):
             continue  # 図面枠が見つからない既知の未対応ケースは表示しない
         regions = analysis.get('regions', [])
         pending_regions = [
-            r for r in regions if is_region_pending_selection(r, checked_names)
+            r for r in regions
+            if is_region_pending_selection(r, checked_names)
+            and not _region_excluded(r, excluded_names)
         ]
         if not err and not pending_regions:
             continue  # 個別選択が不要なファイルは表示しない
