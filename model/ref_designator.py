@@ -728,6 +728,59 @@ def build_named_regions(
     return named, no_name_idx
 
 
+def excluded_region_ids(analysis: dict, excluded_names) -> set:
+    """名称候補のいずれかが「除外」指定された領域の id 集合を返す（v3.11.0新設）。
+
+    `excluded_names` は `view.region_selection.global_excluded_region_names()`
+    が返す、NFKC正規化（`normalize_width()`）済みの名称集合。この関数側でも
+    候補テキストを `normalize_width()` してから比較する（全角/半角表記の
+    揺れを吸収する既存の規約、`region_detector._matched_checked_candidates()`
+    と同じ）。
+
+    候補が1件も無い領域（無名領域）は、指定する名称自体が存在しないため
+    **常に除外されない**（2026-10-08 ユーザー承認）。候補のうち1件でも
+    一致すれば、どの名前を採用するかに関わらずその領域全体を除外する
+    （「領域の確認」での個別選択は不要、2026-10-08 ユーザー決定）。
+    """
+    if not excluded_names:
+        return set()
+    ids = set()
+    for reg in analysis.get('regions', []):
+        for (_dist, text) in reg.get('name_candidates', []):
+            if normalize_width(text) in excluded_names:
+                ids.add(reg['id'])
+                break
+    return ids
+
+
+def filter_labels_outside_excluded(
+    labels: List[Tuple[str, float, float]],
+    excluded_polygons: List[list],
+) -> List[Tuple[str, float, float]]:
+    """除外領域（境界線上を含む）の内側にあるラベルを取り除いたリストを返す
+    （v3.11.0新設）。
+
+    `build_all_regions_summary()` と同じ手法（領域を一時的な疑似名付きの
+    named リストにして `assign_region_labels()` を呼ぶ）を使う。
+    `assign_region_labels()` 内部の `_point_in_polygon(boundary_eps=1e-4)` が
+    境界線上の点を内側として扱うため、「領域線上も含めて除外」はこの既存判定
+    のままで満たされる。入れ子（除外領域の内側に別の特定領域がある）の場合も、
+    外側の除外領域に内包される時点でラベルは除去される（2026-10-08
+    ユーザー承認）。
+
+    判定はラベルのアンカー点 (x, y) のみで行う（テキストのbboxは見ない）。
+    既存の `領域` 列の割り当て（`assign_region_labels()` 自体）と同じ規約に
+    意図的に合わせているため、ここだけ別の判定基準を導入しないこと。
+    """
+    if not excluded_polygons:
+        return list(labels)
+    pseudo_named = [
+        {'polygon': poly, 'name': f'excl-{i}'} for i, poly in enumerate(excluded_polygons)
+    ]
+    assigned = assign_region_labels(labels, pseudo_named)
+    return [(t, x, y) for (t, x, y, names) in assigned if not names]
+
+
 def build_region_output(
     labels: List[Tuple[str, float, float]],
     named: List[dict],
@@ -811,6 +864,8 @@ def build_all_regions_summary(
     fname: str,
     labels: List[Tuple[str, float, float]],
     master_index=None,
+    excluded_ids=frozenset(),
+    named_ids=frozenset(),
 ) -> List[dict]:
     """「領域一覧」シート用: 検出済みの**全領域**（確定・未確定を問わない）について、
     領域名・面積率・領域内ラベル数・領域内機器符号候補数を1ファイル分構築する。
@@ -834,9 +889,19 @@ def build_all_regions_summary(
     含めない（未確定領域の名称候補をラベルの所属先として確定させないため。
     意図的な非対称、2026-08 ユーザー確認）。
 
+    `labels` には**除外前**の全ラベルを渡すこと（v3.11.0、呼び出し元が除外後の
+    リストを渡すと「何件除外されたか」が分からなくなる。`領域内ラベル数`/
+    `領域内機器符号候補数`は常に除外前の件数を表示する、2026-10-08ユーザー決定）。
+
+    `excluded_ids`/`named_ids`（v3.11.0新設）: 各行に `'mark'`
+    （`'除外'`/`'特定'`/`''`）を付与する。`excluded_ids` に含まれる領域は
+    `'除外'`（`'特定'`かどうかより優先）、`named_ids`（`build_named_regions()`
+    が返した named の id集合）に含まれる領域は `'特定'`、それ以外は `''`
+    （候補はあるがどれも特定指定されていない領域）。
+
     Returns:
         list[dict]: [{'id', 'frame', 'name', 'area_pct', 'label_count',
-                       'ref_designator_count'}, ...]（regions の順）
+                       'ref_designator_count', 'mark'}, ...]（regions の順）
     """
     regions = analysis.get('regions', [])
 
@@ -874,6 +939,12 @@ def build_all_regions_summary(
             no_name_idx += 1
             name = "no name" if total_no_name == 1 else f"no name {no_name_idx}"
         pseudo = _pseudo_name(reg['id'])
+        if reg['id'] in excluded_ids:
+            mark = '除外'
+        elif reg['id'] in named_ids:
+            mark = '特定'
+        else:
+            mark = ''
         rows.append({
             'id': reg['id'],
             'frame': reg['frame'],
@@ -881,6 +952,7 @@ def build_all_regions_summary(
             'area_pct': reg['area_pct'],
             'label_count': count_by_id.get(pseudo, 0),
             'ref_designator_count': ref_count_by_id.get(pseudo, 0),
+            'mark': mark,
         })
     return rows
 
@@ -891,6 +963,7 @@ def build_ref_designator_region_results(
     name_selections_by_file: Dict[str, dict],
     sort_value: str = 'asc',
     master_index=None,
+    excluded_names=frozenset(),
 ) -> Dict:
     """領域付きモード用。`extract_ref_designator_data()` の結果と領域検出結果から
     `create_region_excel_output()` に渡せる region_results を構築する。
@@ -901,24 +974,43 @@ def build_ref_designator_region_results(
     有無に関わらず不変）。`subtitle` も併せて格納する（v3.0.0、Summary シート
     にサブタイトルが表示されていなかった不具合の修正）。`region_rows` は
     「領域一覧」シート用の全領域データ（`build_all_regions_summary()` 参照）。
+
+    `excluded_names`（v3.11.0新設）: 「除外」指定された領域名の集合
+    （`view.region_selection.global_excluded_region_names()` が返す、
+    NFKC正規化済みの集合）。該当する領域（境界線上を含む）のラベルは
+    `rows`・`total_in_frame`・`ref_designator_count` から完全に取り除かれる
+    （2026-10-08ユーザー決定）。`region_rows`（領域一覧）には除外領域の行も
+    残し、`mark`列に`'除外'`・ラベル数は**除外前**の件数を記載する
+    （何件除外されたか検証できるようにするため）。
     """
     region_results = {}
     for fname, data in ref_data_by_file.items():
         analysis = region_analyses[fname]
         named, _ = build_named_regions(analysis, name_selections_by_file[fname], fname)
-        out = build_region_output(data['labels'], named, sort_value, master_index=master_index)
+
+        excl_ids = excluded_region_ids(analysis, excluded_names)
+        excl_polys = [reg['polygon'] for reg in analysis.get('regions', [])
+                      if reg['id'] in excl_ids]
+        kept_labels = filter_labels_outside_excluded(data['labels'], excl_polys)
+
+        out = build_region_output(kept_labels, named, sort_value, master_index=master_index)
         ref_designator_count = sum(
             r['個数'] for r in out['rows'] if r['機器符号候補'] in (MARK_DEFINED, MARK_CANDIDATE))
+        # 領域一覧（region_rows）には除外前の全ラベルを渡す（除外前の件数を
+        # 表示するため）。rows/total_in_frame/ref_designator_count は除外後の
+        # kept_labels から算出済み（上記）。
         region_rows = build_all_regions_summary(
             analysis, name_selections_by_file[fname], fname, data['labels'],
-            master_index=master_index)
+            master_index=master_index,
+            excluded_ids=excl_ids,
+            named_ids={r['id'] for r in named})
         region_results[fname] = {
             'rows': out['rows'],
             'named': out['named'],
             'frames': len(analysis.get('frames', [])),
             'regions_detected': len(analysis.get('regions', [])),
             'regions_named': len({r['id'] for r in named}),
-            'total_in_frame': data['total_in_frame'],
+            'total_in_frame': len(kept_labels),
             'ref_designator_count': ref_designator_count,
             'in_region_count': out['in_region_count'],
             'drawing_number': analysis.get('main_drawing_number') or '',
