@@ -263,8 +263,14 @@ def collect_in_frame_labels(
     frame_lineweight: int = 100,
     frame_color: int = _FRAME_COLOR,
     snap: float = 2.0,
+    doc=None,
 ) -> Dict:
     """図面枠内・図面情報枠（タイトルブロック）外のラベルを収集する。
+
+    `doc` に読み込み済みの `ezdxf.Drawing` を渡すと、`dxf_file` を再読み込みしない
+    （呼び出し側が同じファイルをフォールバック等で再利用するときの二重読み込み回避。
+    `extract_ref_designator_data()` 参照）。省略時は `dxf_file` を読み込む。
+    `doc` は読み取りのみで、変更しない。
 
     戻り値 dict:
       frames: [(xl,xr,y0,y1), ...]
@@ -275,11 +281,12 @@ def collect_in_frame_labels(
     result = {
         'frames': [], 'labels': [], 'frames_without_info_frame': 0, 'error': None,
     }
-    try:
-        doc = ezdxf.readfile(dxf_file)
-    except Exception as e:
-        result['error'] = f'DXFファイルの読み込みに失敗しました: {e}'
-        return result
+    if doc is None:
+        try:
+            doc = ezdxf.readfile(dxf_file)
+        except Exception as e:
+            result['error'] = f'DXFファイルの読み込みに失敗しました: {e}'
+            return result
 
     frame_lines, block_lines, label_entities = _collect_frame_and_labels(
         doc, frame_lineweight, frame_color, check_layer=True)
@@ -368,7 +375,7 @@ def collect_in_frame_labels(
     return result
 
 
-def _collect_all_labels_fallback(dxf_file: str) -> List[Tuple[str, float, float]]:
+def _collect_all_labels_fallback(dxf_file: str, doc=None) -> List[Tuple[str, float, float]]:
     """図面枠が検出できない場合のフォールバック: 図面枠フィルタなしで
     ファイル全体のラベルを収集する。
 
@@ -381,11 +388,14 @@ def _collect_all_labels_fallback(dxf_file: str) -> List[Tuple[str, float, float]
     検出できずこのフォールバックに落ちた図面〈唯一のタイトルブロックが
     off/frozenレイヤーにある等〉で、非表示のタイトルブロックの文字が
     出力ラベルに混入していた。`_collect_frame_and_labels()`と同様、
-    直接配置・INSERT自身・virtual_entities展開後の3箇所すべてでチェックする）。"""
-    try:
-        doc = ezdxf.readfile(dxf_file)
-    except Exception:
-        return []
+    直接配置・INSERT自身・virtual_entities展開後の3箇所すべてでチェックする）。
+
+    `doc` に読み込み済みの `ezdxf.Drawing` を渡すと再読み込みしない（読み取りのみ）。"""
+    if doc is None:
+        try:
+            doc = ezdxf.readfile(dxf_file)
+        except Exception:
+            return []
     text_block_cache = {}
 
     def collect_from_layout(layout):
@@ -572,7 +582,14 @@ def extract_ref_designator_data(
         'warning': None,
     }
 
-    collected = collect_in_frame_labels(dxf_file, frame_lineweight, frame_color)
+    # 1回だけ読み込み、図面枠検出とフォールバックの両方で使い回す（従来はフォールバック
+    # 時に同じファイルを2回読み込んでいた。40MBで約2.8秒の無駄）。読み込みに失敗した
+    # ときは doc=None のまま渡し、各関数が従来どおりの失敗処理（error 設定・空リスト）を行う。
+    try:
+        doc = ezdxf.readfile(dxf_file)
+    except Exception:
+        doc = None
+    collected = collect_in_frame_labels(dxf_file, frame_lineweight, frame_color, doc=doc)
     info['frames'] = len(collected.get('frames', []))
     if collected['error']:
         # フォールバック自体は正常な抽出結果につながる（実際に正しく機器符号が
@@ -583,7 +600,7 @@ def extract_ref_designator_data(
             f'図面枠（太さ {frame_lineweight} の線で囲まれた枠）を検出できなかったため、'
             '図面枠内の制約なしに全ラベルを抽出しました。'
         )
-        raw_labels = _collect_all_labels_fallback(dxf_file)
+        raw_labels = _collect_all_labels_fallback(dxf_file, doc=doc)
     else:
         raw_labels = collected['labels']
         if collected.get('frames_without_info_frame'):
