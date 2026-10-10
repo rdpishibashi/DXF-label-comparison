@@ -59,7 +59,7 @@ class RegionDetectionConfig:
 
     # これらの語を含むラベルを名称候補から除外します
     # 既定値: ('NOTE', '☆')
-    NAME_EXCLUDE_TERMS = ('NOTE', '☆')
+    NAME_EXCLUDE_TERMS = ('NOTE', '☆', 'ACCESSORY CABLE', 'FLAT CABLE')
 
     # 1つの閉領域が単独でこの面積比（四捨五入した整数%）以上のとき抽出対象とします
     # 既定値: 5（= 5%。図面枠面積比）
