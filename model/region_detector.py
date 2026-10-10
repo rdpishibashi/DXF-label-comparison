@@ -65,6 +65,7 @@ DEFAULT_REGION_CONFIG = {
     'group_area_ratio': 0.10,   # 同名複数ピースを合算した場合の最小合計面積（枠面積比、整数%比較）
     'min_face_ratio': 0.005,    # 個々の閉領域として残す最小面積（枠面積比、ノイズ除去）
     'name_max_dist': 10.0,      # 名称ラベルの境界からの最大距離
+    'horizontal_name_max_dist': 15.0,  # 回転図面の横エッジ近傍探索の最大距離（None=name_max_dist と同じ）
     'name_min_dist': 1.0,       # 名称ラベルの境界からの最小距離（線分上=0 を除外）
     'name_min_letters': 3,      # 名称候補に必要な英字数
     'name_exclude_terms': ('NOTE', '☆', 'ACCESSORY CABLE', 'FLAT CABLE'),  # 候補から除外する語（含む場合）。config.py の NAME_EXCLUDE_TERMS と同値
@@ -1191,6 +1192,8 @@ def region_name_candidates(
     circuit_keep_terms: tuple = ('RACK',),
     rotated_edge_roles: tuple | None = None,
     horizontal_fallback: bool = False,
+    horizontal_max_dist: float | None = None,
+    horizontal_only: bool = False,
 ) -> tuple[list[tuple[float, str]], dict[str, int]]:
     """領域名候補ラベルを優先順位（Tier）→距離順に返す（テキスト重複除去）。
 
@@ -1248,7 +1251,8 @@ def region_name_candidates(
     Tier3はエッジという概念が無いため常に0＝タイブレークに寄与しない）の
     中点からの沿軸距離。
     """
-    def _scan(edge_segs, dist_center_fn, require_inside):
+    def _scan(edge_segs, dist_center_fn, require_inside, max_d=None):
+        limit_d = max_dist if max_d is None else max_d
         cand = []
         for (t, x, y) in labels:
             if not _is_valid_name_candidate(t, min_letters, exclude_lowercase,
@@ -1258,7 +1262,7 @@ def region_name_candidates(
             if require_inside and not _point_in_polygon((x, y), polygon):
                 continue
             d, c = dist_center_fn((x, y), edge_segs)
-            if min_dist <= d <= max_dist:
+            if min_dist <= d <= limit_d:
                 cand.append((d, c, t))
         return cand
 
@@ -1276,7 +1280,7 @@ def region_name_candidates(
 
     tiered = []
     for tier, edges in ((1, tier1_edges), (2, tier2_edges)):
-        if not edges:
+        if not edges or horizontal_only:
             continue
         for d, c, t in _scan(edges, dist_center_fn, True):
             tiered.append((tier, d, c, t))
@@ -1289,7 +1293,8 @@ def region_name_candidates(
     if not tiered and rotated_edge_roles and horizontal_fallback:
         h_edges = _bottom_edges(polygon) + _top_edges(polygon) + _notch_bottom_edges(polygon)
         if h_edges:
-            for d, c, t in _scan(h_edges, _dist_and_center_to_bottom_edge, True):
+            for d, c, t in _scan(h_edges, _dist_and_center_to_bottom_edge, True,
+                                 max_d=horizontal_max_dist):
                 tiered.append((3, d, c, t))
 
     tiered.sort(key=lambda c: (round(c[1], 1), c[2], c[0]))
@@ -1442,6 +1447,7 @@ def _run_region_detection(lines, det_cfg, frames, frame_area, frame_labels,
                 rotated_edge_roles=rotated_edge_roles,
                 horizontal_fallback=_area_ratio_met(
                     reg['area'], frame_area, det_cfg['area_ratio']),
+                horizontal_max_dist=det_cfg.get('horizontal_name_max_dist'),
                 exclude_circuit_symbols=det_cfg['exclude_circuit_symbols'],
                 exclude_terms=det_cfg['name_exclude_terms'],
                 exclude_lowercase=det_cfg['name_exclude_lowercase'],
@@ -2285,6 +2291,33 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
         regions = _resolve_union_parents(regions, labels=frame_labels, cfg=cfg)
         _apply_cross_frame_frequency_ranking(regions)
         _remove_overlap_claimed_candidates(regions)
+        if rotated_edge_roles:
+            # 重なり判定で候補が空になった領域（面積条件を満たすもの）にも、横エッジ近傍の
+            # ラベルを候補にする（縦エッジの候補が内側の領域に取られた領域が、無名のまま
+            # 残らないように）。追加後に重なり判定をやり直す。
+            rescued = False
+            for reg in regions:
+                if reg['name_candidates'] or not _area_ratio_met(reg['area'], frame_area, area_ratio):
+                    continue
+                nc, tiers = region_name_candidates(
+                    reg['polygon'], frame_labels,
+                    max_dist=cfg['name_max_dist'], min_dist=cfg['name_min_dist'],
+                    min_letters=cfg['name_min_letters'],
+                    rotated_edge_roles=rotated_edge_roles,
+                    exclude_circuit_symbols=cfg['exclude_circuit_symbols'],
+                    exclude_terms=cfg['name_exclude_terms'],
+                    exclude_lowercase=cfg['name_exclude_lowercase'],
+                    circuit_keep_terms=cfg.get('circuit_symbol_keep_terms', ('RACK',)),
+                    horizontal_fallback=True, horizontal_only=True,
+                    horizontal_max_dist=cfg.get('horizontal_name_max_dist'))
+                if nc:
+                    reg['name_candidates'] = nc
+                    reg['default_name'] = nc[0][1]
+                    reg['default_name_tier'] = 3
+                    reg['_tier_by_text'] = tiers
+                    rescued = True
+            if rescued:
+                _remove_overlap_claimed_candidates(regions)
         result['regions'] = regions
 
         del doc, msp
