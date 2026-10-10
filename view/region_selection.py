@@ -16,6 +16,8 @@ DXF-label-comparison にバイト一致のコピーがあり、同プロジェ�
   - `gre_<名称>`: 「領域一覧」の「除外」チェック状態（v3.11.0新設。
     `allow_exclude=False` の呼び出し側〈DXF-label-comparison〉では列自体を
     表示しないため、常に空）
+  - `region_list_editor`: 「領域一覧」表のウィジェット状態（key用ver・元データ・
+    最後に書いたチェック状態）。チェック操作で表を作り直さないための固定用
   - `rc_<ファイルキー>_<領域id>_<i>` / `rc_<ファイルキー>_<領域id>_none`:
     「領域の確認」のチェック状態
 """
@@ -37,6 +39,9 @@ from model.extraction_pipeline import detect_file_regions, extract_file_data
 ANALYSES_KEY = 'region_analyses'
 CONFIRMED_KEY = 'region_selection_confirmed'
 SELECTION_KEY_PREFIXES = ('rc_', 'grc_', 'gre_')
+# 「領域一覧」表の状態（grc_ 接頭辞の外に置く: global_checked_region_names() に混入させない）
+EDITOR_STATE_KEY = 'region_list_editor'
+CHECK_COLUMN_WIDTH = 64  # 「特定」「除外」列（漢字2文字＋ソートボタン）のpx幅
 
 # 図面枠が見つからない場合に `analyze_dxf_regions()` が返すエラーメッセージ
 # （`region_detector.py` 側の文言）に含まれる識別文字列。このケースは既知の
@@ -430,6 +435,27 @@ def invalidate_region_selection_confirmation():
     st.session_state[CONFIRMED_KEY] = False
 
 
+def region_list_editor_state(prev, candidate_names, current):
+    """「領域一覧」表のウィジェット状態（key用のver・表の元データbase・
+    最後にこちらが書いたチェック状態expected）を返す純粋関数。
+
+    表を作り直す（verを上げてbaseを`current`で取り直す）のは次の場合だけ:
+      - 初回（prev が None）
+      - 候補名の一覧（順序込み）が変わった
+      - `current`（正本）が前回こちらが書いた`expected`と違う
+        （「領域を検出」等で外部から正本がクリアされた）
+    チェック操作では作り直さない。作り直すとスクロール位置が先頭へ戻る。
+
+    `current` は {名称: (特定, 除外)}。"""
+    names = list(candidate_names)
+    if (prev is None or prev['names'] != names or prev['expected'] != current):
+        return {
+            'ver': 0 if prev is None else prev['ver'] + 1,
+            'names': names, 'base': dict(current), 'expected': dict(current),
+        }
+    return prev
+
+
 def render_global_region_names_section(candidate_names, locked, action='抽出', allow_exclude=False):
     """「領域一覧」セクション: `candidate_names`（呼び出し側が決める名称候補の
     一覧。表示順のまま使う）を表(st.data_editor)で表示し、領域名ごとに「特定」
@@ -465,70 +491,87 @@ def render_global_region_names_section(candidate_names, locked, action='抽出',
     if allow_exclude:
         st.caption(
             "検出された全ファイル・全領域の名称候補（複数候補を持つ領域も含む）を"
-            "重複なく一覧表示しています。「特定」は従来通り、その名称でこの領域を"
-            f"{action}対象として採用します（候補が2件以上チェックされた領域のみ、"
-            "「領域選択を完了」を押した後に表示される「領域の確認」でどれを採用するか"
-            "個別に選択してください。候補を1つも「特定」しなかった領域は、"
+            "重複なく一覧表示しています。「特定」は、その名称でこの領域を"
+            f"{action}対象として採用します。候補が2件以上チェックされた領域は、"
+            "「領域選択を完了」を押した後に表示される「領域の確認」で採用する領域を"
+            "個別に選択する操作となります。候補を1つも「特定」しなかった領域は、"
             f"単に名称が採用されないだけで、領域内のラベルはそのまま{action}結果に"
-            "残ります）。「除外」はこの領域（境界線上を含む）の内側にあるラベルを"
-            f"{action}結果から完全に取り除きます（「特定」の有無とは無関係に、"
-            "ラベル自体が出力から消えます）。同じ領域名で両方チェックした場合は"
-            "「除外」が優先されます。"
+            "残ります。「除外」はこの領域（境界線上を含む）の内側にあるラベルを"
+            f"{action}結果から取り除きます（出力されません）。"
+            "同じ領域名で両方チェックした場合は「除外」が優先されます。"
         )
     else:
         st.caption(
             "検出された全ファイル・全領域の名称候補（複数候補を持つ領域も含む）を"
             f"重複なく一覧表示しています。{action}したい領域名の「特定」にチェックを"
-            f"入れてください（複数選択可）。ある領域のチェック済み候補がちょうど1件なら、"
-            f"その名称で自動的に{action}されます。チェック済み候補が2件以上残る領域のみ、"
-            "「領域選択を完了」を押した後に表示される「領域の確認」でどれを採用するか"
-            "個別に選択してください。候補を1つも「特定」しなかった領域は、"
-            f"単に名称が採用されないだけで、領域内のラベルはそのまま{action}結果に残ります"
-            "（「領域の確認」にも表示されません）。"
+            f"入れてください（複数選択可）。その領域の名称候補がちょうど1件であれば、"
+            f"その名称で自動的に{action}されます。候補が2件以上ある領域は、"
+            "「領域選択を完了」を押した後に「領域の確認」でどれを採用するかを"
+            "個別に選択していただきます。候補を1つも「特定」しなかった領域は、"
+            f"単に名称が採用されず、領域内のラベルはそのまま{action}結果に残ります。"
         )
 
-    # data_editor とのライブ連動は「正本dict + キー再生成」方式を使う
-    # （streamlitスキル§6参照）——表示中のdata_editorのsession_stateを直接
-    # 書き換えると無限同期ループで画面が固まるため、差分検出時は正本
-    # （`grc_<name>`/`gre_<name>`）を更新してキーのバージョンを上げ、
-    # 別ウィジェットとして再生成する。
+    # data_editor とのライブ連動は「正本dict」方式を使う（streamlitスキル§6参照）
+    # ——表示中のdata_editorのsession_stateを直接書き換えると無限同期ループで
+    # 画面が固まるため、正本（`grc_<name>`/`gre_<name>`）だけを更新する。
+    # 表の元データ（base）とkeyは `region_list_editor_state()` が固定し、
+    # チェック操作では作り直さない（作り直すとスクロール位置が先頭へ戻る）。
     for name in candidate_names:
         st.session_state.setdefault(f"grc_{name}", False)
         if allow_exclude:
             st.session_state.setdefault(f"gre_{name}", False)
 
+    current = {
+        name: (
+            bool(st.session_state[f"grc_{name}"]),
+            bool(st.session_state[f"gre_{name}"]) if allow_exclude else False,
+        )
+        for name in candidate_names
+    }
+    state = region_list_editor_state(
+        st.session_state.get(EDITOR_STATE_KEY), candidate_names, current)
+    st.session_state[EDITOR_STATE_KEY] = state
+
     rows = []
     for name in candidate_names:
-        row = {'領域名': name, '特定': bool(st.session_state[f"grc_{name}"])}
+        spec, excl = state['base'][name]
+        row = {'特定': spec}
         if allow_exclude:
-            row['除外'] = bool(st.session_state[f"gre_{name}"])
+            row['除外'] = excl
+        row['領域名'] = name
         rows.append(row)
-    df = pd.DataFrame(rows).set_index('領域名')
+    df = pd.DataFrame(rows)
 
-    column_config = {'特定': st.column_config.CheckboxColumn('特定')}
+    column_config = {'特定': st.column_config.CheckboxColumn('特定', width=CHECK_COLUMN_WIDTH)}
+    column_order = ['特定']
     if allow_exclude:
-        column_config['除外'] = st.column_config.CheckboxColumn('除外')
+        column_config['除外'] = st.column_config.CheckboxColumn('除外', width=CHECK_COLUMN_WIDTH)
+        column_order.append('除外')
+    column_order.append('領域名')
 
-    ver = st.session_state.get('grc_editor_ver', 0)
     edited = st.data_editor(
-        df, key=f"grc_editor_{ver}", disabled=locked,
-        column_config=column_config,
+        df, key=f"grc_editor_{state['ver']}", hide_index=True,
+        disabled=True if locked else ['領域名'],
+        column_config=column_config, column_order=column_order,
     )
 
-    deltas = []
-    for name in candidate_names:
-        new_spec = bool(edited.loc[name, '特定'])
-        if new_spec != st.session_state[f"grc_{name}"]:
-            deltas.append((f"grc_{name}", new_spec))
-        if allow_exclude:
-            new_excl = bool(edited.loc[name, '除外'])
-            if new_excl != st.session_state[f"gre_{name}"]:
-                deltas.append((f"gre_{name}", new_excl))
-    if deltas:
-        for key, val in deltas:
-            st.session_state[key] = val
+    edited_by_name = edited.set_index('領域名')
+    new_values = {
+        name: (
+            bool(edited_by_name.loc[name, '特定']),
+            bool(edited_by_name.loc[name, '除外']) if allow_exclude else False,
+        )
+        for name in candidate_names
+    }
+    if new_values != current:
+        for name, (spec, excl) in new_values.items():
+            st.session_state[f"grc_{name}"] = spec
+            if allow_exclude:
+                st.session_state[f"gre_{name}"] = excl
+        # key・baseは据え置き（ウィジェットを保持する）。expectedだけ更新して
+        # 「こちらが書いた変更」と「外部クリア」を区別できるようにする
+        state['expected'] = new_values
         invalidate_region_selection_confirmation()
-        st.session_state['grc_editor_ver'] = ver + 1
         st.rerun()
 
     # 「領域選択を完了」: 確定済みなら非表示にする（「領域を検出」ボタンと同じ
@@ -592,9 +635,9 @@ def render_region_confirmation_section(analyses, locked, action='抽出'):
 
     st.subheader("領域の確認")
     st.caption(
-        "「領域一覧」でチェックした候補が2件以上残っている領域（どれを採用する"
-        "か決まっていないもの）があるファイルのみを表示しています。候補を1つも"
-        f"チェックしなかった領域は{action}対象から除外され、ここには表示されません。"
+        "「領域一覧」でチェックした領域の名称候補が2件以上ある（どれを採用する"
+        "か決めることができない）ファイルのみを表示しています。候補を1つも"
+        f"選択しなかった領域は{action}対象から除外され、ここには表示されません。"
     )
 
     rendered_any = False
