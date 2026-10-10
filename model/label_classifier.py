@@ -1,35 +1,24 @@
-"""Reference Designator（機器符号）分類ロジック（純粋なパターン判定のみ）。
+"""ラベルの3分類（機器符号候補 / 領域名候補 / どちらでもない）を判定する
+純粋な文字列判定モジュール。
 
-`ref_designator.py`（DXF抽出パイプライン）から2026-07-26のモジュール分割で
-切り出した。ezdxf・region_detector.py への依存を一切持たない自己完結モジュール
-で、正規化済み文字列に対するパターン判定のみを行う（DXFファイルの読み込み・
-図面枠検出・ラベル収集は `ref_designator.py` 側が担当する）。
+`classify_label()` が唯一の判定関数で、次の2箇所が同じ関数を使う:
+  - `ref_designator.py`（DXF抽出パイプライン）: Excelの「機器符号候補」列
+    （`is_ref_designator_label()` = 分類が DESIGNATOR）
+  - `region_detector.py`（矩形領域検出）: 領域名候補のフィルタ
+    （分類が REGION_NAME のものだけを領域名候補にする）
+ezdxf・region_detector.py への依存を一切持たない自己完結モジュールのため、
+どちらからもモジュールレベルで安全に import できる（循環依存なし）。
 
-この分割の動機: `region_detector.py`（矩形領域検出）の `_is_valid_name_candidate()`
-が領域名候補の機器符号除外判定にこの分類ロジックを必要とする一方、旧
-`ref_designator.py` は `region_detector.py`（`detect_drawing_frames`・
-`assign_region_labels`）に依存していたため、両者は循環依存の関係にあった
-（`region_detector.py` 側は関数内 `from . import ref_designator` の遅延importで
-回避していたが、これは循環依存そのものを解消するものではなかった）。本ファイルは
-`region_detector.py` に一切依存しないため、`region_detector.py` はこのファイルを
-モジュールレベルで安全にimportできる（遅延import不要）。
+旧名 `ref_designator_patterns.py`。2026-10-10、3分類の一元化に伴い改名し、
+旧方式の判定（`classify_judgment_detailed`・確定パターン・追加除外パターン等）を
+削除した。判定順と各語の分類は `classify_label()` の docstring を参照。
 
-**2026-07-30 用途の変更**: `ref_designator.py`（DXF抽出パイプライン）は判定
-条件の簡素化により、除外・追加・確定パターンを使わなくなった（3つの候補
-パターンに一致すれば全件そのまま出力する方式に変更）。本ファイルの除外・
-追加・確定パターン一式は、`region_detector.py` の領域名候補フィルタ専用として
-引き続き利用する（`classify_judgment_detailed()`/`matched_confirmed_category()`
-を経由）。「未確定ラベル」UIでの連動採用・判断ログ向けの関数（旧
-`sibling_key()`/`propagate_selection_all_files()`/`PATTERNS_VERSION`）は
-その機能自体の廃止に伴い削除した。
-
-reference_designator_candidates.xlsx（`Patterns` / `ExclusionPatterns` /
-`ConfirmedPatterns` シート）を正としてパターン・除外・確定リストを実装する。
+reference_designator_candidates.xlsx（`Patterns` / `ExclusionPatterns` シート）と
+reference_deginator_pattern_added.txt（追加機器符号）を元にパターンを実装する。
 """
 import re
 import unicodedata
-from collections import Counter
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 
 # ============================================================
@@ -185,38 +174,19 @@ EXCLUSION_REGEX_CATEGORIES = [
 
 
 # ============================================================
-# 2b. 追加パターン（reference_deginator_pattern_added.txt、2026-07-26 追加確定）
+# 2b. 追加の機器符号パターン（reference_deginator_pattern_added.txt、2026-07-26 追加確定）
 # ============================================================
 #
 # ユーザー提供の速記記法（a=英大文字1字, n=数字1字, *=直前トークンの1回以上
 # 繰り返し, .*=任意の0文字以上・カッコやハイフン等の記号を含む）で書かれた
 # 「除外リスト」「機器符号リスト」を _compile_shorthand_pattern() で正規表現へ
-# 変換して取り込む。EXCLUSION_*_CATEGORIES / CONFIRMED_PATTERN_CATEGORIES の
-# ようなカテゴリー別（普通名詞・回路説明語・ユニット名…）の意味づけは根拠が
+# 変換して取り込む。EXCLUSION_*_CATEGORIES のようなカテゴリー別（普通名詞・回路説明語・ユニット名…）の意味づけは根拠が
 # 曖昧で困難だったため、本リストはカテゴリー分けせず原文の記法のまま
 # フラットに保持する（2026-07-26 ユーザー指摘）。
 #
 # 判定は正規化済みラベル**全体**（括弧を含む）に対して行う（2026-07-26
-# ユーザー確定）。既存の EXCLUSION_*_CATEGORIES / CONFIRMED_PATTERN_CATEGORIES
-# の大半が判定用文字列（judgment＝括弧より前）を基準にするのと対照的。
-#
-# 優先順位（2026-07-26 ユーザー確定、`classify_judgment_detailed()` に実装）:
-#   1) 候補形ゲート（CANDIDATE_PATTERN、judgment基準）— 不一致なら no_match
-#   2) 既存の除外リスト（EXCLUSION_EXACT/REGEX_CATEGORIES、judgment基準）
-#      — 一致すれば excluded。ADDED_DESIGNATOR_PATTERNS と同じ語幹が衝突しても
-#      既存除外が優先される（例: MOT.* は追加機器符号だが MOTOR は普通名詞
-#      除外のまま／PG.* は追加機器符号だが PGND は回路説明語除外のまま。
-#      いずれも「英単語はそのまま除外、MOT1・PG1 等の記号形だけ救済」という
-#      ユーザー判断）。
-#   3) 追加の機器符号リスト（ADDED_DESIGNATOR_PATTERNS、ラベル全体基準）
-#      — 一致すれば candidate かつ確定（自動採用）。4) の追加除外リストより
-#      優先する（例: DC12A3 は DCn*.* 除外より DCnnan 機器符号が優先され、
-#      機器符号として確定する。LS1/OS1 も同様に La.*/O.* 除外より
-#      LS.*/OS.* 機器符号が優先される）。
-#   4) 追加の除外リスト（ADDED_EXCLUSION_PATTERNS、ラベル全体基準）
-#      — 一致すれば excluded（例 DC12, K1, O5, I9）。
-#   5) いずれにも該当しなければ candidate（従来どおり
-#      CONFIRMED_PATTERN_CATEGORIES で確定/未確定に分岐）。
+# ユーザー確定）。`classify_label()` では、英字のみの語が `CN.*`・`MC.*` 等の
+# 追加機器符号に一致するかの判定にだけ使う（除外パターンの一覧は2026-10-10に廃止）。
 #
 # 元ファイルの冗長な重複エントリ（AMP.* の重複、ACTA.* に包含される ACTAa*、
 # Fn*.* に包含される Fnnnaa.*）は除去済み（2026-07-26 ユーザー承認）。
@@ -257,16 +227,6 @@ def _compile_shorthand_pattern(spec: str) -> 're.Pattern[str]':
     return re.compile(r'^%s$' % body)
 
 
-# 追加除外パターン仕様（reference_deginator_pattern_added.txt の
-# 「# 機器符号ではない（除外するパターン）」節、2026-07-26 追加確定）
-_ADDED_EXCLUSION_SPECS = [
-    'An*.*', 'ACn*V', 'AOn*', 'AWSINn*', 'Bn*.*', 'BBC', 'Cn*', 'CM.*',
-    'DCn*.*', 'DIn*', 'DOn*', 'E-LANn*', 'ETC-JPn*', 'FREE.*', 'H.*', 'I.*',
-    'J.*', 'Kn', 'Kn.*', 'La.*', 'O.*', 'OUTn*', 'PLD.*', 'Qn*', 'Sn*.*',
-    'SC.*', 'SKn*', 'SXn*', 'SYn*', 'Tn', 'TP.*', 'TQ.*', 'Wn*', 'Wn*a*',
-    'WESn*', 'WLn*', 'WLn*a*', 'Yn*', 'YOn*', 'Zn*',
-]
-
 # 追加機器符号パターン仕様（同ファイルの「# 機器符号」節。冗長エントリ
 # （AMP.* の重複・ACTAa*・Fnnnaa.*）は除去済み。2026-07-26 追加確定）
 _ADDED_DESIGNATOR_SPECS = [
@@ -280,10 +240,6 @@ _ADDED_DESIGNATOR_SPECS = [
 
 # (カテゴリ名, 正規表現, 元の記法) — カテゴリ名は衝突しないよう仕様文字列を
 # そのまま使う（意味づけによる分類をしない。本節冒頭コメント参照）。
-ADDED_EXCLUSION_PATTERNS = [
-    (f'added_excl:{spec}', _compile_shorthand_pattern(spec), spec)
-    for spec in _ADDED_EXCLUSION_SPECS
-]
 ADDED_DESIGNATOR_PATTERNS = [
     (f'added_desig:{spec}', _compile_shorthand_pattern(spec), spec)
     for spec in _ADDED_DESIGNATOR_SPECS
@@ -297,17 +253,6 @@ def matched_added_designator_category(label: str) -> Optional[str]:
     「機器符号（候補・確定）」となる（2026-07-26 ユーザー確定）。
     """
     for name, rx, _spec in ADDED_DESIGNATOR_PATTERNS:
-        if rx.match(label):
-            return name
-    return None
-
-
-def matched_added_exclusion_category(label: str) -> Optional[str]:
-    """正規化済みラベル全体（括弧含む）が追加の除外パターン
-    （ADDED_EXCLUSION_PATTERNS）のいずれかに一致すればカテゴリ名を返す
-    （一致しなければ None）。
-    """
-    for name, rx, _spec in ADDED_EXCLUSION_PATTERNS:
         if rx.match(label):
             return name
     return None
@@ -356,157 +301,66 @@ def _judgment_text(normalized_label: str) -> str:
     return judgment.rstrip()
 
 
-def classify_judgment_detailed(
-    judgment: str, label: Optional[str] = None,
-) -> Tuple[str, Optional[str]]:
-    """判定用文字列（括弧より前）を分類し、(status, category) を返す。
-
-    `label` は正規化済みラベル全体（括弧を含みうる）。省略時は `judgment` を
-    代わりに使う（呼び出し側が括弧より前の文字列しか持たない場合の後方互換）。
-    追加パターン（ADDED_DESIGNATOR_PATTERNS/ADDED_EXCLUSION_PATTERNS、
-    2026-07-26）はこの `label`（ラベル全体）を基準に判定する。
-
-    status は 'candidate' / 'excluded' / 'no_match'。
-    - 'no_match': 3パターン（Patterns シート）のいずれにも一致しない文字列
-      （説明文・記号・注記等、例 `(2/5)`）。category は常に None。
-    - 'excluded': Patterns には一致したが、除外パターン（ExclusionPatterns シート、
-      例 GND・TITLE・N24 等、または ADDED_EXCLUSION_PATTERNS）に該当したもの。
-      明らかに Reference Designator ではないと確定しているため、候補にも
-      未確定ラベルにも含めない。category は該当したカテゴリの名前。
-    - 'candidate': Patterns に一致し、除外パターンにも該当しないもの（または
-      ADDED_DESIGNATOR_PATTERNS に一致して除外より優先的に救済されたもの）。
-      category は常に None。reference_designator_candidates.xlsx の
-      RemainingUnclassified シートと同じ母集団（＝機器符号候補そのもの）で、
-      「未確定ラベル」UI でのレビュー対象になる（2026-07-10、実データで
-      RemainingUnclassified の中身を再確認して確定: GND/INPUT/TITLE 等は
-      除外カテゴリが付与されており RemainingUnclassified には含まれない＝
-      'excluded' は表示対象外が正しい）。
-
-    判定順序（2026-07-26、ADDED_* 追加時に確定。本節冒頭コメント参照）:
-    候補形ゲート → 既存除外（judgment基準）→ 追加機器符号（label基準、
-    追加除外より優先）→ 追加除外（label基準）。
-    """
-    if not judgment or not CANDIDATE_PATTERN.match(judgment):
-        return 'no_match', None
-    for name, (words, _desc) in EXCLUSION_EXACT_CATEGORIES.items():
-        if judgment in words:
-            return 'excluded', name
-    for name, rx, _desc in EXCLUSION_REGEX_CATEGORIES:
-        if rx.match(judgment):
-            return 'excluded', name
-    full_label = label if label is not None else judgment
-    if matched_added_designator_category(full_label) is not None:
-        return 'candidate', None
-    added_excl_category = matched_added_exclusion_category(full_label)
-    if added_excl_category is not None:
-        return 'excluded', added_excl_category
-    return 'candidate', None
-
-
-def _classify_judgment(judgment: str, label: Optional[str] = None) -> str:
-    """`classify_judgment_detailed()` の status のみを返す簡易版。"""
-    status, _category = classify_judgment_detailed(judgment, label)
-    return status
-
-
-def is_ref_designator_candidate(label: str) -> bool:
-    """正規化済みラベル（表示用、括弧を含みうる）が機器符号（候補）かどうかを返す。
-
-    判定は括弧より前の部分（既存パターン）とラベル全体（追加パターン）の
-    双方に対して行う。呼び出し側は `normalize_label()` で正規化した文字列を
-    渡すこと（内部では再正規化しない）。
-    """
-    return _classify_judgment(_judgment_text(label), label) == 'candidate'
-
-
-def split_candidates(labels: List[str]) -> List[str]:
-    """正規化済みラベルのリストから機器符号（候補）だけを抽出して返す。
-
-    候補は Patterns（3パターン）に一致し、かつ除外パターンに該当しないもの
-    （reference_designator_candidates.xlsx の RemainingUnclassified シートと
-    同じ母集団）。除外パターン該当（GND・TITLE 等）・3パターン非一致
-    （`(2/5)` 等の記号・注記）はいずれも結果に含めない。
-    """
-    return [label for label in labels
-            if _classify_judgment(_judgment_text(label), label) == 'candidate']
-
-
-def summarize_labels(labels: List[str]) -> List[Tuple[str, int]]:
-    """ラベルリストを (ラベル, 個数) にカウントし、ラベル昇順で返す。"""
-    counter = Counter(labels)
-    return [(lbl, counter[lbl]) for lbl in sorted(counter.keys())]
-
-
 # ============================================================
-# 3. 確定パターン（機器符号（候補）のうち、レビュー不要で自動採用してよいもの）
+# 3. ラベルの3分類（機器符号 / 領域名 / どちらでもない）
 # ============================================================
 #
-# 機器符号（候補）＝ is_ref_designator_candidate の中でも、確実に Reference
-# Designator と判定してよい形をユーザーと確定したパターン（2026-07-10、
-# CN/CN-IF/R(...)/VR(...) は2026-07-10 追加確定）。一致したラベルは
-# 「未確定ラベル」UI でのレビューを経ずに最終出力へ自動採用する。
-# A,B の除外は single_letter_digits_except_ab（単一英字+数字）のみに適用する
-# （letters_digits_2or3 系には適用しない。A1/B12等は既存の
-# terminal_row_letter_digit 除外パターンで確定パターン判定より前に除外される
-# ため実害はない）。
-#
-# 各カテゴリの判定基準（第2要素）:
-#   'judgment' … 括弧より前の判定用文字列（`_judgment_text()`）に対して判定
-#                （通常のパターン・除外判定と同じ基準）
-#   'full'     … 正規化済みラベル全体（括弧を含む）に対して判定
-#                （R(...)/VR(...) のように括弧の中身自体を問う場合に使う）
+# 以前は「Excelの機器符号候補列」（`is_ref_designator_label`）と「領域名候補の
+# フィルタ」（旧 `classify_judgment_detailed`）が別々の判定関数を持ち、同じラベルが
+# 片方では機器符号候補、もう片方では領域名候補になる食い違いがあった
+# （例: `CP004 (10A)`・`GND(M4)`）。2026-10-10、3分類を1つの関数で判定する形に
+# 一元化した。ezdxf・region_detector に依存しない純粋な文字列判定のため、
+# ref_designator.py（抽出パイプライン）からも region_detector.py からも
+# モジュールレベルで import できる。
 
-CONFIRMED_PATTERN_CATEGORIES = [
-    # より限定的なパターンを先に判定する（複数一致した場合、より具体的な
-    # カテゴリ名が集計・表示に反映されるようにするため。確定/未確定の結果
-    # 自体はどの順でも変わらない＝いずれか1つでも一致すれば確定）。
-    ('cn_single_digit', 'judgment', re.compile(r'^CN[0-9]$'),
-     'CN + 数字1桁'),
-    ('cn_if_prefix', 'judgment', re.compile(r'^CN-IF.*$'),
-     '"CN-IF" + 任意の文字'),
-    ('r_paren_suffix', 'full', re.compile(r'^R[0-9]+\(.*\)$'),
-     'R + 数字繰り返し + "(" + 任意の文字 + ")"'),
-    ('vr_paren_suffix', 'full', re.compile(r'^VR[0-9]+\(.*\)$'),
-     'VR + 数字繰り返し + "(" + 任意の文字 + ")"'),
-    ('letters_digits_2or3', 'judgment', re.compile(r'^[A-Z]+[0-9]{2,3}$'),
-     '英大文字繰り返し + 数字2桁または3桁'),
-    ('letters_digits_2or3_letter', 'judgment', re.compile(r'^[A-Z]+[0-9]{2,3}[A-Z]$'),
-     '英大文字繰り返し + 数字2桁または3桁 + 英大文字1字'),
-    ('hyphen_letters_digits_notail', 'judgment', re.compile(r'^[A-Z]+-[A-Z]+[0-9]+$'),
-     '英大文字繰り返し + ハイフン + 英大文字繰り返し + 数字繰り返し（末尾に続きなし）'),
-    ('single_letter_digits_except_ab', 'judgment', re.compile(r'^[C-Z][0-9]+$'),
-     'A,B以外の英大文字1字 + 数字の繰り返し'),
-]
+DESIGNATOR = 'designator'    # a: 機器符号候補（Excelの「機器符号候補」列 CAN）
+REGION_NAME = 'region_name'  # b: 領域名候補
+OTHER = 'other'              # c: どちらでもない
+
+_LETTERS_ONLY = re.compile(r'^[A-Z]+$')
+_SINGLE_LETTER = re.compile(r'^[A-Z]$')
+_TRAILING_SIGN = re.compile(r'.*[+-]$')
+# 英字のみ以外の候補パターン（letters_only・単独英字は別扱い）
+_NON_LETTERS_CANDIDATE = re.compile(
+    r'^(?:%s)$' % '|'.join(rx.pattern[1:-1] for n, rx, _d in PATTERN_CATEGORIES
+                           if n != 'letters_only'))
 
 
-def matched_confirmed_category(label: str) -> Optional[str]:
-    """正規化済みラベル（括弧を含みうる）が確定パターンのいずれかに一致すれば
-    カテゴリ名を、一致しなければ None を返す。
+def classify_label(text: str) -> str:
+    """ラベルを `DESIGNATOR`（機器符号候補）/ `REGION_NAME`（領域名候補）/
+    `OTHER`（どちらでもない）に分類する。呼び出し側での正規化は不要。
 
-    従来の `CONFIRMED_PATTERN_CATEGORIES` を先に判定し（カテゴリ名の後方互換を
-    保つ。例: `CN3` は追加パターンの `added_desig:CN.*` にも一致するが、既存の
-    `cn_single_digit` を優先して返す）、一致しなければ追加の機器符号パターン
-    （ADDED_DESIGNATOR_PATTERNS、ラベル全体基準）を判定する（2026-07-26）。
-    いずれか一方にでも一致すれば「確定（自動採用）」である点は変わらない
-    （判定順序が影響するのはカテゴリ名の表示のみ）。`CONFIRMED_PATTERN_CATEGORIES`
-    の大半は括弧より前の判定用文字列（judgment）に対して判定するが、括弧の
-    中身自体を問うパターン（`r_paren_suffix`/`vr_paren_suffix`）はラベル全体に
-    対して判定する（`CONFIRMED_PATTERN_CATEGORIES` の判定基準参照）。
+    判定用文字列は `_judgment_text()`（括弧・` **`・Ω語より前）で、判定順は次のとおり
+    （最初に当たったもので決まる）:
+      1. 空・英大文字1字・末尾が `+`/`-` → `OTHER`
+      2. 英字のみ以外の候補パターン（`PATTERN_CATEGORIES`）に一致 → `DESIGNATOR`
+         例 `CP004`・`SX01`・`THM01`・`R10`・`CN-IF2-1`・`RACK1`、`CP004 (10A)`
+      3. 英字のみのとき:
+         - 除外語（`EXCLUSION_EXACT_CATEGORIES`）のうち `unit_names` → `REGION_NAME`（例 `CTC`）
+         - それ以外の除外語・除外パターン → `OTHER`（例 `GND`・`MOTOR`・`SYSTEM`・`XPID`）
+         - 追加機器符号（`ADDED_DESIGNATOR_PATTERNS`、ラベル全体基準）に一致 →
+           `DESIGNATOR`（例 `CNESCD`・`MCBHPB`）
+         - それ以外 → `REGION_NAME`（例 `MFFX`・`FB`）
+      4. 上記以外（複数語・記号入りなど）→ `REGION_NAME`（例 `SYSTEM I/F BOX`）
     """
-    judgment = _judgment_text(label)
-    for name, basis, rx, _desc in CONFIRMED_PATTERN_CATEGORIES:
-        target = label if basis == 'full' else judgment
-        if rx.match(target):
-            return name
-    return matched_added_designator_category(label)
+    judgment = _judgment_text(normalize_label(text))
+    if not judgment or _SINGLE_LETTER.match(judgment) or _TRAILING_SIGN.match(judgment):
+        return OTHER
+    if _NON_LETTERS_CANDIDATE.match(judgment):
+        return DESIGNATOR
+    if _LETTERS_ONLY.match(judgment):
+        for name, (words, _desc) in EXCLUSION_EXACT_CATEGORIES.items():
+            if judgment in words:
+                return REGION_NAME if name == 'unit_names' else OTHER
+        for _name, rx, _desc in EXCLUSION_REGEX_CATEGORIES:
+            if rx.match(judgment):
+                return OTHER
+        if matched_added_designator_category(judgment) is not None:
+            return DESIGNATOR
+        return REGION_NAME
+    return REGION_NAME
 
 
-def is_confirmed_designator(label: str) -> bool:
-    """正規化済みラベルが機器符号（候補）であり、かつ確定パターンにも一致するか。
-
-    True の場合、「未確定ラベル」UI でのレビューを経ずに最終出力へ自動採用してよい。
-    """
-    judgment = _judgment_text(label)
-    if _classify_judgment(judgment, label) != 'candidate':
-        return False
-    return matched_confirmed_category(label) is not None
+def is_ref_designator_label(text: str) -> bool:
+    """text が機器符号候補（Excelの「機器符号候補」列 CAN）か。"""
+    return classify_label(text) == DESIGNATOR

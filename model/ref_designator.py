@@ -10,20 +10,17 @@ DXF-extract-labels 固有の新機能であり、他プロジェクトとの共�
   1. 図面枠内、かつ図面情報枠（タイトルブロック）外のラベルをスコープとする
   2. ラベル末尾に括弧で閉じた文字列がある場合は、その括弧より前の部分で
      判定する（ただし出力は原文のまま）
-  3. 3つの候補パターン（`ref_designator_patterns.PATTERN_CATEGORIES`）の
-     いずれかに一致するラベルを、除外や確認なしにそのまま全件出力する
+  3. `label_classifier.classify_label()` が機器符号候補（DESIGNATOR）と判定した
+     ラベルを、除外や確認なしにそのまま全件出力する
 
 図面情報欄の除外は、従来の構造的除外（図面枠線を直接の子に持つ
 「フォーマットブロック」由来のテキストを丸ごと除外）から、幾何検出
 （図面枠の右下、右辺・底辺が図面枠に接する矩形をタイトル項目名の並びから
 特定する）に置き換えた。詳細は `_detect_info_frame_bbox()` を参照。
 
-除外・追加・確定パターン（`ref_designator_patterns.py` の
-`EXCLUSION_*`/`ADDED_*`/`CONFIRMED_PATTERN_CATEGORIES`/
-`classify_judgment_detailed()`/`matched_confirmed_category()` 等）は、
-本パイプラインでは使わないが、`region_detector.py` の領域名候補フィルタ
-（機器符号らしいラベルを領域名候補から除外する判定）が引き続き利用するため
-`ref_designator_patterns.py` 側には残している。
+機器符号候補の判定は `label_classifier.py` の `classify_label()`（機器符号／領域名／
+どちらでもないの3分類）に一元化されており、`region_detector.py` の領域名候補
+フィルタも同じ関数を使う。
 """
 import re
 from collections import Counter, defaultdict
@@ -34,7 +31,7 @@ import ezdxf
 from .common_utils import normalize_width, select_layout_result, is_invisible
 from .extract_labels import extract_text_from_entity, _block_has_text_content
 from .region_detector import detect_drawing_frames, assign_region_labels
-from .ref_designator_patterns import CANDIDATE_PATTERN, normalize_label, _judgment_text
+from .label_classifier import normalize_label, is_ref_designator_label  # noqa: F401（再エクスポート）
 
 
 # ============================================================
@@ -441,67 +438,6 @@ def normalize_labels(
         if nt:
             out.append((nt, x, y))
     return out
-
-
-# 英大文字1字だけの文字列は、図形枠外の位置記号（座標系ラベル等）であって
-# 機器符号ではない（`ref_designator_patterns.EXCLUSION_REGEX_CATEGORIES` の
-# `single_letter_position` と同じ規約）。v2.0.0で除外パターン一式を判定条件
-# から外した際にこの1件だけ意図せず失われていた回帰（2026-09-14ユーザー
-# 指摘で発覚。`letters_only`〈`^[A-Z]+$`〉が単一英字も候補として拾ってしまう
-# ため、'H'・'V'等が機器符号候補='Y'になっていた）。`PATTERN_CATEGORIES`
-# 自体は変更しない——`region_detector.py`の領域名候補フィルタ
-# （`classify_judgment_detailed()`経由）が同じカテゴリ定義を使っており、
-# そちらは元々`single_letter_position`除外が有効なまま残っているため、
-# ここで個別に例外を設ける方が安全（`PATTERN_CATEGORIES`を直接変更すると
-# 領域名候補フィルタの挙動まで変わってしまう）。
-_SINGLE_LETTER_PATTERN = re.compile(r'^[A-Z]$')
-
-# 末尾が "+"/"-" で終わる文字列は電源端子表記（例 `N24-`・`L1+`）であって
-# 単体の機器符号ではない（`ref_designator_patterns.EXCLUSION_REGEX_CATEGORIES`
-# の `trailing_sign`〈`.*[+-]$`〉と同じ規約）。単一英字の場合と異なり
-# VERSION_HISTORY.md に明示的な方針変更の記録はなく、v2.0.0で除外パターン
-# 一式を外した際にこちらも一緒に失われていた（2026-09-14ユーザー指摘で
-# 発覚。実データで`letters_digits_any`〈`^[A-Z]+[0-9]+[A-Z0-9-]*$`〉の
-# 末尾`[A-Z0-9-]*`が末尾ハイフンを許容してしまうため、`N24-`・`CN1-`等が
-# 誤って機器符号候補='Y'になっていた。ただし末尾"+"は元々どの候補パターンにも
-# "+"という文字自体が含まれないため既に候補にならず、実害があるのは末尾"-"
-# の場合のみ——ここでは`trailing_sign`と同じ`[+-]`両対応のまま実装し、
-# 将来パターンに"+"が追加されても安全なようにする）。
-# `PATTERN_CATEGORIES`自体は変更しない（理由は上記`_SINGLE_LETTER_PATTERN`
-# と同じ——`region_detector.py`の領域名候補フィルタへの影響を避けるため）。
-#
-# 一方、普通名詞・回路説明語・ケーブル色・図面情報枠用語・ユニット名
-# （`EXCLUSION_EXACT_CATEGORIES`、GND・SYSTEM・MOTOR等）は**復元しない**
-# （2026-09-14ユーザー確認）。v2.0.0でこれらを候補に含めるよう明示的に
-# 方針変更した記録がVERSION_HISTORY.mdにあり（「GND・SYSTEM等の英字のみ
-# ラベルも3パターンに一致すれば出力に含まれるようになる仕様変更」）、
-# 単一英字・末尾+/-（いずれも方針変更の記録がなく、意図せず失われた回帰と
-# 判断したもの）とは扱いが異なる。
-_TRAILING_SIGN_PATTERN = re.compile(r'.*[+-]$')
-
-
-def is_ref_designator_label(text: str) -> bool:
-    """textが機器符号（Reference Designator）候補パターンに一致するかを返す。
-
-    判定はラベル末尾の括弧より前の部分（`_judgment_text()`）に対して行う
-    （`R10(2.2K)` → `R10` で判定）。候補パターン
-    （`ref_designator_patterns.PATTERN_CATEGORIES`、計7カテゴリ）のいずれかに
-    一致すれば True（除外パターン等は使わない——v2.0.0で廃止した判定条件の
-    簡素化方針を踏襲する。`ref_designator_patterns.is_ref_designator_candidate()`
-    とは別物: あちらは除外パターンも併用する旧方式の判定で、`region_detector.py`
-    の領域名候補フィルタ専用）。ただし英大文字1字だけ（`_SINGLE_LETTER_PATTERN`）・
-    末尾が"+"/"-"で終わるもの（`_TRAILING_SIGN_PATTERN`）は例外的に除外する
-    （上記コメント参照。普通名詞等の`EXCLUSION_EXACT_CATEGORIES`は復元して
-    いない——GND・SYSTEM等は引き続き候補として扱う、2026-09-14ユーザー確認）。
-
-    v3.0.0で「機器符号候補」列（各シートのラベルごとの判定表示）に使うため
-    独立関数化した（旧 `classify_labels()` の判定条件と同一、そちらは
-    リストへの絞り込み版としてこの関数を使う形に変更）。
-    """
-    judgment = _judgment_text(text)
-    if _SINGLE_LETTER_PATTERN.match(judgment) or _TRAILING_SIGN_PATTERN.match(judgment):
-        return False
-    return bool(CANDIDATE_PATTERN.match(judgment))
 
 
 # 「機器符号候補」列の値（v3.10.0、機器符号一覧のパイプライン組み込みに伴い

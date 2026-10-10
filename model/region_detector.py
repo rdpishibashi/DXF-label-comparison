@@ -30,7 +30,7 @@ import ezdxf
 
 from .extract_labels import extract_text_from_entity, extract_drawing_numbers
 from .common_utils import normalize_width, select_layout_result, is_invisible
-from .ref_designator_patterns import classify_judgment_detailed, matched_confirmed_category
+from .label_classifier import classify_label, REGION_NAME
 
 
 # ============================================================
@@ -1029,48 +1029,11 @@ def _is_valid_name_candidate(t, min_letters, exclude_lowercase, exclude_terms,
         return False
     if any(term.upper() in up for term in (exclude_terms or ())):
         return False
+    # 機器符号の除外は `label_classifier.classify_label()` の3分類で判定する
+    # （領域名候補にするのは REGION_NAME だけ。Excelの「機器符号候補」列と同じ関数）。
+    # circuit_keep_terms（RACK等）を含むラベルは機器符号扱いにしない。
     if exclude_circuit_symbols and not any(k.upper() in up for k in (circuit_keep_terms or ())):
-        # 2026-07-26 変更: `filter_non_circuit_symbols()`（"英字2文字以上"等の
-        # 粗い正規表現）は、正当な領域名（例 `MFFX`）まで機器符号として誤って
-        # 除外していた（ユーザー報告: `DE5027-563-03A.dxf` 図面1/領域3で
-        # `MFFX` が名称候補にならない不具合。`filter_non_circuit_symbols(['MFFX'])`
-        # が「英字のみ2文字以上」パターンに一致し除外していたことが判明）。
-        # `ref_designator.py` の分類（`reference_designator_list.xlsx` の
-        # `RemainingUnclassified`/`ConfirmedDesignators` で実データ検証済み）に
-        # 判定を置き換える。`classify_judgment_detailed()` の3状態
-        # （'no_match'/'excluded'/'candidate'）をそのまま使う必要がある——
-        # ラッパーの `is_ref_designator_candidate()`（'candidate' のみ True）だけで
-        # 判定すると、'no_match'（スペース等を含み機器符号の形にすら一致しない。
-        # 例 `EFEM UPPER`・`SYSTEM I/F BOX` のような複数語の実在領域名）と
-        # 'excluded'（`GND` 等、既知の非designator語で除外）を区別できず、
-        # 複数語の正当な領域名まで丸ごとブロックする重大な回帰を起こした
-        # （実装中に発覚・訂正）。
-        #   - 'no_match'（形状自体が不一致。複数語・スラッシュ等を含む大半の
-        #     実在領域名）→ 除外しない
-        #   - 'excluded' かつ `unit_names` 以外（`GND`・`MOTOR`等、既知の
-        #     非designator語。旧実装でも機器符号として除外されていた）→ 除外する
-        #   - 'excluded' かつ `unit_names`（`CTC`・`EFEM`・`CASE`・`FOUP`・
-        #     `SHIELD`等）→ 除外しない（2026-07-26 ユーザー報告で追加確認:
-        #     `DE5327-405-26A.dxf` 図面1/領域2で `CTC` が領域名候補にならない
-        #     不具合。`unit_names` は「ユニット/モジュール名」であり
-        #     機器符号（候補）ではないという判定用のカテゴリで、領域名としては
-        #     むしろ正当な候補である。common_nouns/cable_colors/titleblock_terms
-        #     等の他の除外カテゴリとは意味が異なるため、`unit_names` のみ例外
-        #     扱いする）
-        #   - 'candidate' かつ確定 Reference Designator（`R10`・`CN3`・`CNCNT`〈追加
-        #     機器符号パターン `added_desig:CN.*` に一致〉等）→ 除外する
-        #   - 'candidate' かつ未確定（`RemainingUnclassified` 相当、例
-        #     `MFFX`・`FB`）→ 除外しない（今回の主目的）
-        # `RACK1` はこの判定に到達する前に `circuit_keep_terms=('RACK',)` の
-        # 分岐で既にバイパスされるため無関係。分類ロジックは
-        # `ref_designator_patterns`（ezdxf/region_detector.py に依存しない
-        # 純粋な文字列判定モジュール、2026-07-26 分割）から使う——
-        # `ref_designator.py`（DXF抽出パイプライン）は region_detector.py に
-        # 依存するため、そちらを import すると循環依存になる。
-        status, cat = classify_judgment_detailed(up, up)
-        if status == 'excluded' and cat != 'unit_names':
-            return False
-        if status == 'candidate' and matched_confirmed_category(up) is not None:
+        if classify_label(up) != REGION_NAME:
             return False
     return True
 
