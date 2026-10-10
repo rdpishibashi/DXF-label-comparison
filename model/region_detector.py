@@ -45,8 +45,10 @@ DEFAULT_REGION_CONFIG = {
     'region_lineweight': 25,    # 領域境界線の太さ
     'region_color': 2,          # 領域境界線の色(ACI)
     'snap': 2.0,                # 軸平行判定・レベルクラスタの許容誤差
-    'face_snap': 0.1,           # 矩形を構成する線分同士の接続点(交点)の座標マージン
-                                # ※小さく（違う矩形を取り込むリスクを抑える）
+    'face_snap': 0.5,           # 矩形を構成する線分同士の接続点(交点)の座標マージン
+                                # （2026-10-10に0.1→0.5。角が0.1超ずれた外枠が閉領域にならず
+                                # 検出されない図面があったため。変更は config.py の
+                                # ADVANCED_OVERRIDES で上書き可）
     'merge_level_tol': 0.5,     # 共線セグメント結合時のレベル座標(縦=x/横=y)一致許容
                                 # ※小さくする（別レベルの線=別矩形を結合しない）
     # ギャップ（隙間）の橋渡し方針：部品ラベルは縦線分だけを途切れさせるため、
@@ -1307,18 +1309,6 @@ def region_name_candidates(
         for d, c, t in _scan(edges, dist_center_fn, True):
             tiered.append((tier, d, c, t))
 
-    # Tier1/2 でも候補ゼロの場合のみ、ポリゴン全体の境界への最短距離でフォールバック
-    # （エッジという概念が無いため中央オフセットは常に0＝タイブレークに寄与しない）
-    if not tiered:
-        for (t, x, y) in labels:
-            if not _is_valid_name_candidate(t, min_letters, exclude_lowercase,
-                                            exclude_terms, exclude_circuit_symbols,
-                                            circuit_keep_terms):
-                continue
-            d = _dist_point_to_polygon((x, y), polygon)
-            if min_dist <= d <= max_dist:
-                tiered.append((3, d, 0.0, t))
-
     tiered.sort(key=lambda c: (round(c[1], 1), c[2], c[0]))
     seen = set()
     out = []
@@ -1534,6 +1524,13 @@ def _apply_cross_frame_frequency_ranking(regions):
             r['default_name_tier'] = r.get('_tier_by_text', {}).get(reordered[0][1])
 
 
+def _region_inside(inner, outer):
+    """多角形 inner が outer に完全に含まれる（全頂点が内側または境界上、かつ面積が
+    小さい）か。"""
+    return (_polygon_area(inner) < _polygon_area(outer)
+            and all(_point_in_polygon(p, outer) for p in inner))
+
+
 def _remove_overlap_claimed_candidates(regions):
     """重なる領域同士で、同じ名称候補テキストをより近い側（小さい距離）の領域
     だけに残し、遠い側からは取り除く（`regions_overlap()` が True の領域間のみ）。
@@ -1574,6 +1571,15 @@ def _remove_overlap_claimed_candidates(regions):
                 if j == i or not _overlap(i, j):
                     continue
                 if any(t2 == t and d2 < d for d2, t2 in original[j]):
+                    claimed_by_closer = True
+                    break
+                # 距離が同じでも、相手 j が自分 i に完全に含まれる内側の領域なら
+                # 内側の領域の名称とみなし、外側 i の候補から外す（2026-10-10
+                # ユーザー指示。EE3294-039-05A.dxf の 53% 領域から内側 5.6% 領域の
+                # `SENSOR I/F B.D-Ⅲ` を外す。切り欠き辺と内側領域の下辺が同じ線で
+                # 距離が同値になっていた）。
+                if any(t2 == t and d2 == d for d2, t2 in original[j]) \
+                        and _region_inside(regions[j]['polygon'], regions[i]['polygon']):
                     claimed_by_closer = True
                     break
             if not claimed_by_closer:
