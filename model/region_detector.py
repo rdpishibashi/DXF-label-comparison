@@ -1190,6 +1190,7 @@ def region_name_candidates(
     exclude_lowercase: bool = True,
     circuit_keep_terms: tuple = ('RACK',),
     rotated_edge_roles: tuple | None = None,
+    horizontal_fallback: bool = False,
 ) -> tuple[list[tuple[float, str]], dict[str, int]]:
     """領域名候補ラベルを優先順位（Tier）→距離順に返す（テキスト重複除去）。
 
@@ -1279,6 +1280,17 @@ def region_name_candidates(
             continue
         for d, c, t in _scan(edges, dist_center_fn, True):
             tiered.append((tier, d, c, t))
+
+    # 回転図面で、縦エッジ（下端/上端相当）に候補が1件も無いときだけ、横エッジ
+    # （DXF上の下辺・上辺。回転図面では見た目の左右の辺）の内側近傍のラベルも
+    # 低い優先度（Tier3）で候補にする（2026-10-10 ユーザー指示。回転図面でも
+    # 領域名が見た目の左右の辺側に書かれている図面があるため。縦エッジに候補が
+    # ある領域は従来どおりで変わらない）。
+    if not tiered and rotated_edge_roles and horizontal_fallback:
+        h_edges = _bottom_edges(polygon) + _top_edges(polygon) + _notch_bottom_edges(polygon)
+        if h_edges:
+            for d, c, t in _scan(h_edges, _dist_and_center_to_bottom_edge, True):
+                tiered.append((3, d, c, t))
 
     tiered.sort(key=lambda c: (round(c[1], 1), c[2], c[0]))
     seen = set()
@@ -1428,6 +1440,8 @@ def _run_region_detection(lines, det_cfg, frames, frame_area, frame_labels,
                 max_dist=det_cfg['name_max_dist'], min_dist=det_cfg['name_min_dist'],
                 min_letters=det_cfg['name_min_letters'],
                 rotated_edge_roles=rotated_edge_roles,
+                horizontal_fallback=_area_ratio_met(
+                    reg['area'], frame_area, det_cfg['area_ratio']),
                 exclude_circuit_symbols=det_cfg['exclude_circuit_symbols'],
                 exclude_terms=det_cfg['name_exclude_terms'],
                 exclude_lowercase=det_cfg['name_exclude_lowercase'],
