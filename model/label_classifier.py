@@ -326,6 +326,35 @@ _NON_LETTERS_CANDIDATE = re.compile(
                            if n != 'letters_only'))
 
 
+# 機器符号の形に見えても機器符号候補にせず、領域名候補にするパターン（2026-10-10 ユーザー指定。
+# 後日戻す可能性があるため、戻すときはこのタプルを空にする）。
+# 「英字繰返し+数字繰返し+英字繰返し+数字繰返し」（例 `DC19A4`）。
+NON_DESIGNATOR_PATTERNS = (
+    re.compile(r'^[A-Z]+[0-9]+[A-Z]+[0-9]+$'),
+)
+
+
+# 機器符号候補にも領域名候補にもしない（OTHER）パターン（2026-10-10 ユーザー指定。後日戻す
+# 可能性があるため、戻すときはこのタプルを空にする）。
+# 「英大文字1字+数字1〜2桁」のうち、A・C・L・Q・U・F 以外の文字で始まるもの
+# （例 `R10`・`N24`・`P24`・`D4`・`X05`・`M10`）。A・C・L・Q・U・F は従来どおり機器符号候補。
+OTHER_PATTERNS = (
+    re.compile(r'^[BDEGHIJKMNOPRSTVWXYZ][0-9]{1,2}$'),
+)
+
+# 上の形に一致しても、追加機器符号（`CN.*`・`DIO.*`・`CIR.*`・`MC.*` 等。コネクタ・端子台など）に
+# 一致するものは機器符号のまま残す。ただし、この形そのものを定義している追加パターン
+# （`Dnnnan`・`DCnnan`。例 `DC19A4`）は対象外（領域名候補にしたいという指定のため）。
+_SHAPE_ADDED_SPECS = ('added_desig:Dnnnan', 'added_desig:DCnnan')
+
+
+def _is_non_designator_shape(judgment: str) -> bool:
+    if not any(rx.match(judgment) for rx in NON_DESIGNATOR_PATTERNS):
+        return False
+    added = matched_added_designator_category(judgment)
+    return added is None or added in _SHAPE_ADDED_SPECS
+
+
 def classify_label(text: str) -> str:
     """ラベルを `DESIGNATOR`（機器符号候補）/ `REGION_NAME`（領域名候補）/
     `OTHER`（どちらでもない）に分類する。呼び出し側での正規化は不要。
@@ -333,6 +362,9 @@ def classify_label(text: str) -> str:
     判定用文字列は `_judgment_text()`（括弧・` **`・Ω語より前）で、判定順は次のとおり
     （最初に当たったもので決まる）:
       1. 空・英大文字1字・末尾が `+`/`-` → `OTHER`
+      1a. `OTHER_PATTERNS`（A・C・L・Q・U・F 以外の英大文字1字+数字1〜2桁。例 `R10`・`N24`）→ `OTHER`
+      1b. `NON_DESIGNATOR_PATTERNS`（英字+数字+英字+数字 の形。例 `DC19A4`）→ `REGION_NAME`
+          （ただし `CN.*`・`DIO.*` 等の追加機器符号に一致するものは機器符号のまま）
       2. 英字のみ以外の候補パターン（`PATTERN_CATEGORIES`）に一致 → `DESIGNATOR`
          例 `CP004`・`SX01`・`THM01`・`R10`・`CN-IF2-1`・`RACK1`、`CP004 (10A)`
       3. 英字のみのとき:
@@ -346,6 +378,10 @@ def classify_label(text: str) -> str:
     judgment = _judgment_text(normalize_label(text))
     if not judgment or _SINGLE_LETTER.match(judgment) or _TRAILING_SIGN.match(judgment):
         return OTHER
+    if any(rx.match(judgment) for rx in OTHER_PATTERNS):
+        return OTHER
+    if _is_non_designator_shape(judgment):
+        return REGION_NAME
     if _NON_LETTERS_CANDIDATE.match(judgment):
         return DESIGNATOR
     if _LETTERS_ONLY.match(judgment):

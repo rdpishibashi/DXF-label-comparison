@@ -22,6 +22,7 @@
   11. トップレベル解析（公開API: analyze_dxf_regions, assign_region_labels）
 """
 import math
+import re
 import gc
 import os
 from collections import defaultdict
@@ -64,6 +65,7 @@ DEFAULT_REGION_CONFIG = {
     'group_area_ratio': 0.10,   # 同名複数ピースを合算した場合の最小合計面積（枠面積比、整数%比較）
     'min_face_ratio': 0.005,    # 個々の閉領域として残す最小面積（枠面積比、ノイズ除去）
     'name_max_dist': 10.0,      # 名称ラベルの境界からの最大距離
+    'horizontal_name_max_dist': 15.0,  # 回転図面の横エッジ近傍探索の最大距離（None=name_max_dist と同じ）
     'name_min_dist': 1.0,       # 名称ラベルの境界からの最小距離（線分上=0 を除外）
     'name_min_letters': 3,      # 名称候補に必要な英字数
     'name_exclude_terms': ('NOTE', '☆', 'ACCESSORY CABLE', 'FLAT CABLE'),  # 候補から除外する語（含む場合）。config.py の NAME_EXCLUDE_TERMS と同値
@@ -1000,6 +1002,9 @@ def _count_letters(s):
     return sum(1 for ch in s if _is_letter(ch))
 
 
+_HIRAGANA_KANJI = re.compile('[\u3040-\u309F\u3400-\u4DBF\u4E00-\u9FFF]')
+
+
 def _is_valid_name_candidate(t, min_letters, exclude_lowercase, exclude_terms,
                               exclude_circuit_symbols, circuit_keep_terms):
     """領域名候補ラベルとして有効かを返す（ポリゴン非依存フィルタ）。
@@ -1026,6 +1031,10 @@ def _is_valid_name_candidate(t, min_letters, exclude_lowercase, exclude_terms,
     # （"MD SHUTTER I/F B.D-Ⅵ" のような長い正当な名称は除外しないため）。
     stripped = up.strip()
     if not stripped or not ('A' <= stripped[0] <= 'Z'):
+        return False
+    # ひらがな・漢字を含むラベルは注記文であって領域名ではない（2026-10-10 ユーザー指定。
+    # 例 `DC PS3のみピン番号変更`。カタカナは対象外）。
+    if _HIRAGANA_KANJI.search(up):
         return False
     if any(term.upper() in up for term in (exclude_terms or ())):
         return False
@@ -1182,6 +1191,9 @@ def region_name_candidates(
     exclude_lowercase: bool = True,
     circuit_keep_terms: tuple = ('RACK',),
     rotated_edge_roles: tuple | None = None,
+    horizontal_fallback: bool = False,
+    horizontal_max_dist: float | None = None,
+    horizontal_only: bool = False,
 ) -> tuple[list[tuple[float, str]], dict[str, int]]:
     """領域名候補ラベルを優先順位（Tier）→距離順に返す（テキスト重複除去）。
 
@@ -1239,7 +1251,8 @@ def region_name_candidates(
     Tier3はエッジという概念が無いため常に0＝タイブレークに寄与しない）の
     中点からの沿軸距離。
     """
-    def _scan(edge_segs, dist_center_fn, require_inside):
+    def _scan(edge_segs, dist_center_fn, require_inside, max_d=None):
+        limit_d = max_dist if max_d is None else max_d
         cand = []
         for (t, x, y) in labels:
             if not _is_valid_name_candidate(t, min_letters, exclude_lowercase,
@@ -1249,7 +1262,7 @@ def region_name_candidates(
             if require_inside and not _point_in_polygon((x, y), polygon):
                 continue
             d, c = dist_center_fn((x, y), edge_segs)
-            if min_dist <= d <= max_dist:
+            if min_dist <= d <= limit_d:
                 cand.append((d, c, t))
         return cand
 
@@ -1267,10 +1280,22 @@ def region_name_candidates(
 
     tiered = []
     for tier, edges in ((1, tier1_edges), (2, tier2_edges)):
-        if not edges:
+        if not edges or horizontal_only:
             continue
         for d, c, t in _scan(edges, dist_center_fn, True):
             tiered.append((tier, d, c, t))
+
+    # 回転図面で、縦エッジ（下端/上端相当）に候補が1件も無いときだけ、横エッジ
+    # （DXF上の下辺・上辺。回転図面では見た目の左右の辺）の内側近傍のラベルも
+    # 低い優先度（Tier3）で候補にする（2026-10-10 ユーザー指示。回転図面でも
+    # 領域名が見た目の左右の辺側に書かれている図面があるため。縦エッジに候補が
+    # ある領域は従来どおりで変わらない）。
+    if not tiered and rotated_edge_roles and horizontal_fallback:
+        h_edges = _bottom_edges(polygon) + _top_edges(polygon) + _notch_bottom_edges(polygon)
+        if h_edges:
+            for d, c, t in _scan(h_edges, _dist_and_center_to_bottom_edge, True,
+                                 max_d=horizontal_max_dist):
+                tiered.append((3, d, c, t))
 
     tiered.sort(key=lambda c: (round(c[1], 1), c[2], c[0]))
     seen = set()
@@ -1420,6 +1445,9 @@ def _run_region_detection(lines, det_cfg, frames, frame_area, frame_labels,
                 max_dist=det_cfg['name_max_dist'], min_dist=det_cfg['name_min_dist'],
                 min_letters=det_cfg['name_min_letters'],
                 rotated_edge_roles=rotated_edge_roles,
+                horizontal_fallback=_area_ratio_met(
+                    reg['area'], frame_area, det_cfg['area_ratio']),
+                horizontal_max_dist=det_cfg.get('horizontal_name_max_dist'),
                 exclude_circuit_symbols=det_cfg['exclude_circuit_symbols'],
                 exclude_terms=det_cfg['name_exclude_terms'],
                 exclude_lowercase=det_cfg['name_exclude_lowercase'],
@@ -2143,44 +2171,22 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
                 frame_cands[fi] = _merge_cands_lists(frame_cands[fi], fc2[j])
                 dangling_by_frame[fi] = dg2[j]
 
-        # それでも閾値超え候補がゼロだった図面枠に限り、かつラベルの過半数が90°回転
-        # している（=図面全体が90°回転して描かれている）場合のみ、横線分のギャップ
-        # 橋渡しを有効にして再検出する（安全条件＝縦線分の端点とのコーナー一致無し・
-        # CIRCLE無し、は橋渡し縦線分と同じ）。判定・再検出とも図面枠単位（zero_fis の
-        # み）で行う理由は上記 LWPOLYLINE パスと同じ（1ファイル内の一部の図面枠だけが
-        # 回転コンテンツを持つケースを取りこぼさない）。
-        # 回転判定（`rotated`）はファイル全体のラベル集計に基づく既存の判定のまま
-        # 維持する——通常向きの図面枠で「単に検出ゼロ件だったから」をトリガーに横線分
-        # も橋渡ししてしまうと、無関係な隣接矩形を誤って結合する副作用があるため
-        # （`_is_globally_rotated` 参照）。
-        # このゲートは gate_ratio（area_ratio と 0.15 の大きい方）で判定する。
-        # このパスは既存候補を「置き換える」が、実際には既存候補を包含する
-        # スーパーセットを返す（橋渡しを追加するだけで、既存の境界検出を壊さない）
-        # ため、area_ratio が低く設定されていても、より大きな正しい領域を見逃さない
-        # よう積極的に発動させる（`DE5434-553-10B.dxf` の90°回転枠で、面積の小さい
-        # 候補〔LA CHAMBER 13.59%等〕が5%を満たすため回転橋渡しパスがスキップされ、
-        # 本来27.89%まで正しく検出されるはずの `CN I/F B.D TYPE3 (CN-IF3-1A)` が
-        # 0.94%の断片のまま埋もれて消えていた不具合。2026-07-14 発見・修正）。
-        # 既知の限界（2026-07-26、ユーザー承認済み・修正見送り）: このゲート
-        # （zero_fis のみ）と直前の LWPOLYLINE 追加ゲートは、いずれも独立に
-        # 「ゼロヒットのフレームのみ」で発動する。あるフレームが1件でも
-        # area_ratio を満たす候補（例 EFEM UPPER）を見つけた時点でどちらの
-        # ゲートも素通りするため、「LWPOLYLINE 追加」と「横ギャップ橋渡し」の
-        # "両方" が揃って初めて閉じる入れ子領域（`EE6868-516-01A.dxf` の
-        # `EFEM UPPER` 内部、`#FEC`〈x:85.3-630.8〉・`#FEB`〈x:110.3-618.0〉を
-        # 辺とする2つの入れ子矩形。上辺の一部が LWPOLYLINE 由来かつ複数分節に
-        # 分かれている）は、フレームが既に1件ヒット済みのため両ゲートとも発動
-        # せず、検出されないまま残る（`_detect_regions()` に両方の条件を直接
-        # 渡せば正しく検出できることを確認済み）。「各図面枠は最低1件見つければ
-        # 良い」という現行のエスカレーション設計の構造的な限界であり、解消には
-        # ゲート条件自体の見直し（全フレームで常に両パスを試して結果を合算する
-        # 等）が必要で影響範囲が広いため、既知の限界として受容する
-        # （ユーザー判断。`test_region_extraction.py` の
-        # `test_known_limitation_nested_regions_require_both_escalations`
-        # 参照）。
+        # ラベルの過半数が90°回転している（=図面全体が90°回転して描かれている）場合は、
+        # 全ての図面枠で横線分のギャップ橋渡しを有効にして再検出する（回転図面では
+        # 部品記号が横線分を途切れさせるため。安全条件＝縦線分の端点とのコーナー一致無し・
+        # CIRCLE無し、は橋渡し縦線分と同じ）。回転図面でなければ何もしない
+        # （通常向きの図面で横線分も橋渡しすると、無関係な隣接矩形を誤って結合する
+        # 副作用があるため。`_is_globally_rotated` 参照）。
+        # 回転判定（`rotated`）はファイル全体のラベル集計に基づく。
+        # 閾値超えの領域が既にある枠でも実行する: 枠内に別の大きい領域があるだけで
+        # 見送ると、その内側の領域（`EE6333-610-07A.dxf` の6頂点の内包領域〔約30%〕、
+        # `EE6868-516-01A.dxf` の入れ子領域）が検出されない。結果は既存候補を包含する
+        # スーパーセットで、橋渡しを追加するだけで既存の境界検出は壊さない。
+        # 守るテスト: `tests/regression/bugfix/test_rotated_bridge_runs_on_all_frames.py`・
+        # `test_region_extraction.py::test_known_limitation_nested_regions_require_both_escalations`。
         det_cfg = cfg
-        zero_fis = _zero_hit_frame_indices(frame_cands, gate_ratio)
-        if zero_fis and rotated:
+        zero_fis = list(range(len(frame_cands))) if rotated else []
+        if zero_fis:
             det_cfg = dict(cfg)
             det_cfg['bridge_horizontal_gaps'] = True
             sub_frames = [frames[fi] for fi in zero_fis]
@@ -2285,6 +2291,33 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
         regions = _resolve_union_parents(regions, labels=frame_labels, cfg=cfg)
         _apply_cross_frame_frequency_ranking(regions)
         _remove_overlap_claimed_candidates(regions)
+        if rotated_edge_roles:
+            # 重なり判定で候補が空になった領域（面積条件を満たすもの）にも、横エッジ近傍の
+            # ラベルを候補にする（縦エッジの候補が内側の領域に取られた領域が、無名のまま
+            # 残らないように）。追加後に重なり判定をやり直す。
+            rescued = False
+            for reg in regions:
+                if reg['name_candidates'] or not _area_ratio_met(reg['area'], frame_area, area_ratio):
+                    continue
+                nc, tiers = region_name_candidates(
+                    reg['polygon'], frame_labels,
+                    max_dist=cfg['name_max_dist'], min_dist=cfg['name_min_dist'],
+                    min_letters=cfg['name_min_letters'],
+                    rotated_edge_roles=rotated_edge_roles,
+                    exclude_circuit_symbols=cfg['exclude_circuit_symbols'],
+                    exclude_terms=cfg['name_exclude_terms'],
+                    exclude_lowercase=cfg['name_exclude_lowercase'],
+                    circuit_keep_terms=cfg.get('circuit_symbol_keep_terms', ('RACK',)),
+                    horizontal_fallback=True, horizontal_only=True,
+                    horizontal_max_dist=cfg.get('horizontal_name_max_dist'))
+                if nc:
+                    reg['name_candidates'] = nc
+                    reg['default_name'] = nc[0][1]
+                    reg['default_name_tier'] = 3
+                    reg['_tier_by_text'] = tiers
+                    rescued = True
+            if rescued:
+                _remove_overlap_claimed_candidates(regions)
         result['regions'] = regions
 
         del doc, msp

@@ -642,6 +642,37 @@ def extract_ref_designator_rows(
     }
 
 
+def unnamed_output_names(analysis: dict) -> Dict[int, str]:
+    """名称候補が1つも無い領域（無名領域）の出力名を `{領域id: 名前}` で返す。
+
+    名前は `"no name"`（この図面に無名領域が1つだけのとき）、複数あれば図面内で
+    `"no name 1"`・`"no name 2"`…と領域の並び順に通し番号を付ける（番号は複数の無名領域を
+    区別するためだけのもので、1つなら付けない。2026-07-23 ユーザー指摘）。
+    `build_named_regions()`・`build_all_regions_summary()` と「領域一覧」の表示名が
+    同じ規則を使うための唯一の実装。"""
+    unnamed = [reg for reg in analysis.get('regions', []) if not reg.get('name_candidates')]
+    return {
+        reg['id']: ("no name" if len(unnamed) == 1 else f"no name {i}")
+        for i, reg in enumerate(unnamed, start=1)
+    }
+
+
+def unnamed_region_label(output_name: str, area_pct: float) -> str:
+    """「領域一覧」に出す無名領域の表示名（例 `no name 2（65%）`）。ファイル名は含めない
+    （見出しに表示されているため。2026-10-10 ユーザー指示）。同じ表示名が複数ファイルに
+    出た場合は1行にまとまり、「特定」「除外」は該当する全領域に効く。"""
+    return f"{output_name}（{area_pct:.0f}%）"
+
+
+def unnamed_region_labels(analysis: dict) -> Dict[int, str]:
+    """無名領域の `{領域id: 「領域一覧」の表示名}`（1ファイル分）。"""
+    names = unnamed_output_names(analysis)
+    return {
+        reg['id']: unnamed_region_label(names[reg['id']], reg.get('area_pct', 0))
+        for reg in analysis.get('regions', []) if reg['id'] in names
+    }
+
+
 def build_named_regions(
     analysis: dict,
     name_selections: dict,
@@ -654,23 +685,24 @@ def build_named_regions(
     機器符号抽出パイプライン向けに複製したものが由来。region_detector.py の共有ロジック
     には手を入れないため、ここに独立して実装している）。
 
+    `name_selections[(fname, 領域id)] == ['']` は「採用しない」の印（無名領域を
+    「領域一覧」で「特定」OFFにした場合。`view.region_selection.gather_name_selections()`
+    が付ける）。その領域は named に含めない。
+
     戻り値: (named, next_no_name_idx)
     """
     named = []
     regions = analysis.get('regions', [])
-    # 番号は複数の無名領域を区別するためだけのものなので、この図面に無名領域が
-    # 1つしかない場合は付けない（ユーザー指摘: 番号があるとユーザーがその意味を
-    # 理解できず不安に感じる。2026-07-23）。
-    total_no_name = sum(
-        1 for reg in regions
-        if not name_selections.get((fname, reg['id']), []) and not reg.get('name_candidates')
-    )
-    no_name_idx = start_no_name_idx
+    # 無名領域の出力名は `unnamed_output_names()`（「領域一覧」の表示名と同じ規則）。
+    # 「特定」OFFの無名領域がある場合も、番号は一覧の表示名と食い違わない。
+    no_name_by_id = unnamed_output_names(analysis)
+    no_name_idx = start_no_name_idx + len(no_name_by_id)
     for reg in regions:
         chosen_names = name_selections.get((fname, reg['id']), [])
-        if not chosen_names and not reg.get('name_candidates'):
-            no_name_idx += 1
-            chosen_names = ["no name" if total_no_name == 1 else f"no name {no_name_idx}"]
+        if chosen_names == ['']:
+            continue  # 無名領域を「領域一覧」で「特定」OFFにした（採用しない）
+        if not chosen_names and reg['id'] in no_name_by_id:
+            chosen_names = [no_name_by_id[reg['id']]]
         for nm in chosen_names:
             if not nm:
                 continue
@@ -690,14 +722,18 @@ def excluded_region_ids(analysis: dict, excluded_names) -> set:
     揺れを吸収する既存の規約、`region_detector._matched_checked_candidates()`
     と同じ）。
 
-    候補が1件も無い領域（無名領域）は、指定する名称自体が存在しないため
-    **常に除外されない**（2026-10-08 ユーザー承認）。候補のうち1件でも
-    一致すれば、どの名前を採用するかに関わらずその領域全体を除外する
+    名称候補が1件も無い領域（無名領域）は、「領域一覧」の表示名
+    （`unnamed_region_label()`。例 `no name 2（65%）`）が `excluded_names` に
+    含まれれば除外する（2026-10-10 ユーザー決定。以前は無名領域は除外対象外だった）。
+    候補のうち1件でも一致すれば、どの名前を採用するかに関わらずその領域全体を除外する
     （「領域の確認」での個別選択は不要、2026-10-08 ユーザー決定）。
     """
     if not excluded_names:
         return set()
     ids = set()
+    for reg_id, label in unnamed_region_labels(analysis).items():
+        if label in excluded_names:
+            ids.add(reg_id)
     for reg in analysis.get('regions', []):
         for (_dist, text) in reg.get('name_candidates', []):
             if normalize_width(text) in excluded_names:
@@ -875,22 +911,19 @@ def build_all_regions_summary(
             if matched:
                 ref_count_by_id[nm] += 1
 
-    # 番号は複数の無名領域を区別するためだけのものなので、この図面に無名領域が
-    # 1つしかない場合は付けない（build_named_regions() と同じ方針）。
-    total_no_name = sum(1 for reg in regions if not reg.get('name_candidates'))
-    no_name_idx = 0
+    # 無名領域の名前は `unnamed_output_names()`（build_named_regions() と同じ規則）。
+    no_name_by_id = unnamed_output_names(analysis)
 
     rows = []
     for reg in regions:
-        chosen = name_selections.get((fname, reg['id']), [])
+        chosen = [c for c in name_selections.get((fname, reg['id']), []) if c]
         candidates = [text for (_dist, text) in reg.get('name_candidates', [])]
         if chosen:
             name = ', '.join(dict.fromkeys(chosen))
         elif candidates:
             name = ', '.join(candidates)
         else:
-            no_name_idx += 1
-            name = "no name" if total_no_name == 1 else f"no name {no_name_idx}"
+            name = no_name_by_id[reg['id']]
         pseudo = _pseudo_name(reg['id'])
         if reg['id'] in excluded_ids:
             mark = '除外'
