@@ -42,6 +42,7 @@ SELECTION_KEY_PREFIXES = ('rc_', 'grc_', 'gre_')
 # 「領域一覧」表の状態（grc_ 接頭辞の外に置く: global_checked_region_names() に混入させない）
 EDITOR_STATE_KEY = 'region_list_editor'
 CHECK_COLUMN_WIDTH = 64  # 「特定」「除外」列（漢字2文字＋ソートボタン）のpx幅
+NAME_COLUMN_WIDTH = 240  # 「領域名」列のpx幅
 
 # 図面枠が見つからない場合に `analyze_dxf_regions()` が返すエラーメッセージ
 # （`region_detector.py` 側の文言）に含まれる識別文字列。このケースは既知の
@@ -548,11 +549,15 @@ def render_global_region_names_section(candidate_names, locked, action='抽出',
         column_config['除外'] = st.column_config.CheckboxColumn('除外', width=CHECK_COLUMN_WIDTH)
         column_order.append('除外')
     column_order.append('領域名')
+    column_config['領域名'] = st.column_config.TextColumn('領域名', width=NAME_COLUMN_WIDTH)
+    # 列幅の合計が表の幅より小さいと、余白が全列に均等配分されて幅指定が無効になる
+    # （Streamlit仕様）。表自体の幅を列幅の合計に固定して指定どおりの幅にする。
+    table_width = CHECK_COLUMN_WIDTH * (len(column_order) - 1) + NAME_COLUMN_WIDTH
 
     edited = st.data_editor(
         df, key=f"grc_editor_{state['ver']}", hide_index=True,
         disabled=True if locked else ['領域名'],
-        column_config=column_config, column_order=column_order,
+        column_config=column_config, column_order=column_order, width=table_width,
     )
 
     edited_by_name = edited.set_index('領域名')
