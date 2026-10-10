@@ -42,7 +42,7 @@ SELECTION_KEY_PREFIXES = ('rc_', 'grc_', 'gre_')
 # 「領域一覧」表の状態（grc_ 接頭辞の外に置く: global_checked_region_names() に混入させない）
 EDITOR_STATE_KEY = 'region_list_editor'
 CHECK_COLUMN_WIDTH = 64  # 「特定」「除外」列（漢字2文字＋ソートボタン）のpx幅
-NAME_COLUMN_WIDTH = 240  # 「領域名」列のpx幅
+NAME_COLUMN_WIDTH = 360  # 「領域名」列のpx幅
 
 # 図面枠が見つからない場合に `analyze_dxf_regions()` が返すエラーメッセージ
 # （`region_detector.py` 側の文言）に含まれる識別文字列。このケースは既知の
