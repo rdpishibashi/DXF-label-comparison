@@ -66,7 +66,7 @@ DEFAULT_REGION_CONFIG = {
     'name_max_dist': 10.0,      # 名称ラベルの境界からの最大距離
     'name_min_dist': 1.0,       # 名称ラベルの境界からの最小距離（線分上=0 を除外）
     'name_min_letters': 3,      # 名称候補に必要な英字数
-    'name_exclude_terms': ('NOTE', '☆'),  # 候補から除外する語（含む場合）
+    'name_exclude_terms': ('NOTE', '☆', 'ACCESSORY CABLE', 'FLAT CABLE'),  # 候補から除外する語（含む場合）。config.py の NAME_EXCLUDE_TERMS と同値
     'name_exclude_lowercase': True,  # 英小文字を含むラベルを名称候補から除外
     'exclude_titleblock': True, # 図番枠（タイトルブロック）を領域から除外
     'exclude_circuit_symbols': True,   # 機器符号(候補)を名称候補から除外
