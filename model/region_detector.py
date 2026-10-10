@@ -22,6 +22,7 @@
   11. トップレベル解析（公開API: analyze_dxf_regions, assign_region_labels）
 """
 import math
+import re
 import gc
 import os
 from collections import defaultdict
@@ -1000,6 +1001,9 @@ def _count_letters(s):
     return sum(1 for ch in s if _is_letter(ch))
 
 
+_HIRAGANA_KANJI = re.compile('[\u3040-\u309F\u3400-\u4DBF\u4E00-\u9FFF]')
+
+
 def _is_valid_name_candidate(t, min_letters, exclude_lowercase, exclude_terms,
                               exclude_circuit_symbols, circuit_keep_terms):
     """領域名候補ラベルとして有効かを返す（ポリゴン非依存フィルタ）。
@@ -1026,6 +1030,10 @@ def _is_valid_name_candidate(t, min_letters, exclude_lowercase, exclude_terms,
     # （"MD SHUTTER I/F B.D-Ⅵ" のような長い正当な名称は除外しないため）。
     stripped = up.strip()
     if not stripped or not ('A' <= stripped[0] <= 'Z'):
+        return False
+    # ひらがな・漢字を含むラベルは注記文であって領域名ではない（2026-10-10 ユーザー指定。
+    # 例 `DC PS3のみピン番号変更`。カタカナは対象外）。
+    if _HIRAGANA_KANJI.search(up):
         return False
     if any(term.upper() in up for term in (exclude_terms or ())):
         return False
@@ -2143,44 +2151,22 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
                 frame_cands[fi] = _merge_cands_lists(frame_cands[fi], fc2[j])
                 dangling_by_frame[fi] = dg2[j]
 
-        # それでも閾値超え候補がゼロだった図面枠に限り、かつラベルの過半数が90°回転
-        # している（=図面全体が90°回転して描かれている）場合のみ、横線分のギャップ
-        # 橋渡しを有効にして再検出する（安全条件＝縦線分の端点とのコーナー一致無し・
-        # CIRCLE無し、は橋渡し縦線分と同じ）。判定・再検出とも図面枠単位（zero_fis の
-        # み）で行う理由は上記 LWPOLYLINE パスと同じ（1ファイル内の一部の図面枠だけが
-        # 回転コンテンツを持つケースを取りこぼさない）。
-        # 回転判定（`rotated`）はファイル全体のラベル集計に基づく既存の判定のまま
-        # 維持する——通常向きの図面枠で「単に検出ゼロ件だったから」をトリガーに横線分
-        # も橋渡ししてしまうと、無関係な隣接矩形を誤って結合する副作用があるため
-        # （`_is_globally_rotated` 参照）。
-        # このゲートは gate_ratio（area_ratio と 0.15 の大きい方）で判定する。
-        # このパスは既存候補を「置き換える」が、実際には既存候補を包含する
-        # スーパーセットを返す（橋渡しを追加するだけで、既存の境界検出を壊さない）
-        # ため、area_ratio が低く設定されていても、より大きな正しい領域を見逃さない
-        # よう積極的に発動させる（`DE5434-553-10B.dxf` の90°回転枠で、面積の小さい
-        # 候補〔LA CHAMBER 13.59%等〕が5%を満たすため回転橋渡しパスがスキップされ、
-        # 本来27.89%まで正しく検出されるはずの `CN I/F B.D TYPE3 (CN-IF3-1A)` が
-        # 0.94%の断片のまま埋もれて消えていた不具合。2026-07-14 発見・修正）。
-        # 既知の限界（2026-07-26、ユーザー承認済み・修正見送り）: このゲート
-        # （zero_fis のみ）と直前の LWPOLYLINE 追加ゲートは、いずれも独立に
-        # 「ゼロヒットのフレームのみ」で発動する。あるフレームが1件でも
-        # area_ratio を満たす候補（例 EFEM UPPER）を見つけた時点でどちらの
-        # ゲートも素通りするため、「LWPOLYLINE 追加」と「横ギャップ橋渡し」の
-        # "両方" が揃って初めて閉じる入れ子領域（`EE6868-516-01A.dxf` の
-        # `EFEM UPPER` 内部、`#FEC`〈x:85.3-630.8〉・`#FEB`〈x:110.3-618.0〉を
-        # 辺とする2つの入れ子矩形。上辺の一部が LWPOLYLINE 由来かつ複数分節に
-        # 分かれている）は、フレームが既に1件ヒット済みのため両ゲートとも発動
-        # せず、検出されないまま残る（`_detect_regions()` に両方の条件を直接
-        # 渡せば正しく検出できることを確認済み）。「各図面枠は最低1件見つければ
-        # 良い」という現行のエスカレーション設計の構造的な限界であり、解消には
-        # ゲート条件自体の見直し（全フレームで常に両パスを試して結果を合算する
-        # 等）が必要で影響範囲が広いため、既知の限界として受容する
-        # （ユーザー判断。`test_region_extraction.py` の
-        # `test_known_limitation_nested_regions_require_both_escalations`
-        # 参照）。
+        # ラベルの過半数が90°回転している（=図面全体が90°回転して描かれている）場合は、
+        # 全ての図面枠で横線分のギャップ橋渡しを有効にして再検出する（回転図面では
+        # 部品記号が横線分を途切れさせるため。安全条件＝縦線分の端点とのコーナー一致無し・
+        # CIRCLE無し、は橋渡し縦線分と同じ）。回転図面でなければ何もしない
+        # （通常向きの図面で横線分も橋渡しすると、無関係な隣接矩形を誤って結合する
+        # 副作用があるため。`_is_globally_rotated` 参照）。
+        # 回転判定（`rotated`）はファイル全体のラベル集計に基づく。
+        # 閾値超えの領域が既にある枠でも実行する: 枠内に別の大きい領域があるだけで
+        # 見送ると、その内側の領域（`EE6333-610-07A.dxf` の6頂点の内包領域〔約30%〕、
+        # `EE6868-516-01A.dxf` の入れ子領域）が検出されない。結果は既存候補を包含する
+        # スーパーセットで、橋渡しを追加するだけで既存の境界検出は壊さない。
+        # 守るテスト: `tests/regression/bugfix/test_rotated_bridge_runs_on_all_frames.py`・
+        # `test_region_extraction.py::test_known_limitation_nested_regions_require_both_escalations`。
         det_cfg = cfg
-        zero_fis = _zero_hit_frame_indices(frame_cands, gate_ratio)
-        if zero_fis and rotated:
+        zero_fis = list(range(len(frame_cands))) if rotated else []
+        if zero_fis:
             det_cfg = dict(cfg)
             det_cfg['bridge_horizontal_gaps'] = True
             sub_frames = [frames[fi] for fi in zero_fis]

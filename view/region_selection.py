@@ -35,6 +35,7 @@ from model.region_detector import (
     pending_candidates_for_region,
 )
 from model.extraction_pipeline import detect_file_regions, extract_file_data
+from model.ref_designator import unnamed_region_labels
 
 ANALYSES_KEY = 'region_analyses'
 CONFIRMED_KEY = 'region_selection_confirmed'
@@ -162,12 +163,15 @@ def global_excluded_region_names():
     }
 
 
-def _region_excluded(reg, excluded_names):
+def _region_excluded(reg, excluded_names, unnamed_label=None):
     """この領域の名称候補のいずれかが「除外」指定されているかを判定する
-    （`model.ref_designator.excluded_region_ids()` と同じ正規化規約。
-    v3.11.0新設。候補が0件の無名領域は対象外——決定9「無名領域は除外対象外」）。"""
+    （`model.ref_designator.excluded_region_ids()` と同じ正規化規約。v3.11.0新設）。
+    名称候補が0件の無名領域は、「領域一覧」の表示名（`unnamed_label`）が除外指定
+    されているかで判定する（2026-10-10 ユーザー決定。以前は無名領域は除外対象外）。"""
     if not excluded_names:
         return False
+    if unnamed_label is not None and unnamed_label in excluded_names:
+        return True
     return any(
         normalize_width(text) in excluded_names
         for (_dist, text) in reg.get('name_candidates', [])
@@ -182,7 +186,7 @@ def gather_name_selections(fname, analysis):
     みなす（2026-07-30 ユーザー指定）。そのため、候補が0件チェック済みの
     領域はここでは何も返さない（無所属のまま。候補が元々0件の無名領域は
     呼び出し先の `ref_designator.build_named_regions()` 等が自動 "no name"
-    命名を行う）。
+    命名を行う。無名領域の「特定」「除外」は「領域一覧」の表示名で判定する）。
 
     「除外」指定された領域はここでは一切名称を決定しない（v3.11.0新設）。
     除外領域のラベルは `ref_designator.filter_labels_outside_excluded()` に
@@ -192,9 +196,19 @@ def gather_name_selections(fname, analysis):
     """
     checked_names = global_checked_region_names()
     excluded_names = global_excluded_region_names()
+    unnamed_labels = unnamed_region_labels(analysis)
     name_selections = {}
     for reg in analysis.get('regions', []):
-        if _region_excluded(reg, excluded_names):
+        label = unnamed_labels.get(reg['id'])
+        if _region_excluded(reg, excluded_names, label):
+            continue
+        if label is not None:
+            # 無名領域は「特定」が既定ON（従来から自動で "no name" として採用していた
+            # ため）。「領域一覧」で明示的にOFFにしたときだけ採用しない（['']=採用しない
+            # の印。`ref_designator.build_named_regions()` 参照）。「領域一覧」に出さない
+            # 呼び出し側（DXF-label-comparison）ではキーが無いので従来どおり採用される。
+            if not st.session_state.get(f"grc_{label}", True):
+                name_selections[(fname, reg['id'])] = ['']
             continue
         decided = resolve_globally_decided_name(reg, checked_names)
         if decided is not None:
@@ -457,7 +471,8 @@ def region_list_editor_state(prev, candidate_names, current):
     return prev
 
 
-def render_global_region_names_section(candidate_names, locked, action='抽出', allow_exclude=False):
+def render_global_region_names_section(candidate_names, locked, action='抽出', allow_exclude=False,
+                                       default_on_names=()):
     """「領域一覧」セクション: `candidate_names`（呼び出し側が決める名称候補の
     一覧。表示順のまま使う）を表(st.data_editor)で表示し、領域名ごとに「特定」
     （`allow_exclude=True` のときはさらに「除外」）をON/OFFさせる
@@ -479,6 +494,9 @@ def render_global_region_names_section(candidate_names, locked, action='抽出',
     「除外」の両方をONにした場合は「除外」が優先される（2026-10-08ユーザー決定）。
     `allow_exclude=False`（例: DXF-label-comparison）のときは「除外」列自体を
     表示しない。
+
+    `default_on_names`: 「特定」の既定値をONにする名称（名称のない領域の表示名。従来から
+    自動で採用していた領域の既定の出力を変えないため）。
 
     `candidate_names` が空の場合は案内メッセージのみ表示する（面積条件〈config.py
     の area_ratio / group_area_ratio〉を満たす領域が1件も無かった、または
@@ -517,8 +535,9 @@ def render_global_region_names_section(candidate_names, locked, action='抽出',
     # 画面が固まるため、正本（`grc_<name>`/`gre_<name>`）だけを更新する。
     # 表の元データ（base）とkeyは `region_list_editor_state()` が固定し、
     # チェック操作では作り直さない（作り直すとスクロール位置が先頭へ戻る）。
+    default_on = set(default_on_names)
     for name in candidate_names:
-        st.session_state.setdefault(f"grc_{name}", False)
+        st.session_state.setdefault(f"grc_{name}", name in default_on)
         if allow_exclude:
             st.session_state.setdefault(f"gre_{name}", False)
 
