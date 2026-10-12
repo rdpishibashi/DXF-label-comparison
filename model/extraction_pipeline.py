@@ -29,6 +29,7 @@ def detect_file_regions(dxf_path, fname, region_cfg):
     解析結果（`analyze_dxf_regions()` の戻り値）を返す。"""
     analysis = analyze_dxf_regions(dxf_path, region_cfg)
     dn_info = _drawing_info(dxf_path, fname)
+    analysis['source_filename'] = fname
     analysis['main_drawing_number'] = dn_info.get('main_drawing_number')
     analysis['title'] = dn_info.get('title')
     analysis['subtitle'] = dn_info.get('subtitle')

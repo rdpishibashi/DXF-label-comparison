@@ -22,6 +22,7 @@ DXF-extract-labels 固有の新機能であり、他プロジェクトとの共�
 どちらでもないの3分類）に一元化されており、`region_detector.py` の領域名候補
 フィルタも同じ関数を使う。
 """
+import os
 import re
 from collections import Counter, defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -657,18 +658,24 @@ def unnamed_output_names(analysis: dict) -> Dict[int, str]:
     }
 
 
-def unnamed_region_label(output_name: str, area_pct: float) -> str:
-    """「領域一覧」に出す無名領域の表示名（例 `no name 2（65%）`）。ファイル名は含めない
-    （見出しに表示されているため。2026-10-10 ユーザー指示）。同じ表示名が複数ファイルに
-    出た場合は1行にまとまり、「特定」「除外」は該当する全領域に効く。"""
-    return f"{output_name}（{area_pct:.0f}%）"
+def unnamed_region_label(output_name: str, area_pct: float, drawing_id: str = '') -> str:
+    """「領域一覧」に出す無名領域の表示名（例 `no name 2（65%）DE3527-553-10E`）。
+    どの図面の領域か分かるよう末尾に図番（`drawing_id`）を付ける。同じ出力名・面積でも
+    図面が違えば別の表示名になるため、「特定」「除外」は図面ごとに指定できる。
+    `drawing_id` が空なら付けない。"""
+    return f"{output_name}（{area_pct:.0f}%）{drawing_id}"
 
 
 def unnamed_region_labels(analysis: dict) -> Dict[int, str]:
-    """無名領域の `{領域id: 「領域一覧」の表示名}`（1ファイル分）。"""
+    """無名領域の `{領域id: 「領域一覧」の表示名}`（1ファイル分）。
+
+    末尾に付ける識別子は図番（`main_drawing_number`）、図番が無ければ拡張子を除いた
+    ファイル名（`source_filename`）、どちらも無ければ付けない。"""
     names = unnamed_output_names(analysis)
+    drawing_id = (analysis.get('main_drawing_number')
+                  or os.path.splitext(analysis.get('source_filename') or '')[0])
     return {
-        reg['id']: unnamed_region_label(names[reg['id']], reg.get('area_pct', 0))
+        reg['id']: unnamed_region_label(names[reg['id']], reg.get('area_pct', 0), drawing_id)
         for reg in analysis.get('regions', []) if reg['id'] in names
     }
 
