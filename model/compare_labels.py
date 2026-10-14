@@ -23,25 +23,26 @@ ROW_STYLE_B_ONLY = 'B_ONLY'
 ROW_STYLE_MISMATCH = 'MISMATCH'
 ROW_STYLE_MATCH = 'MATCH'
 
-COLOR_A_ONLY = {'bg_color': '#D9E1F2', 'font_color': '#1F4E79'}      # 青
-COLOR_B_ONLY = {'bg_color': '#C6EFCE', 'font_color': '#006100'}      # 緑
-COLOR_MISMATCH = {'bg_color': '#FFEB9C', 'font_color': '#9C6500'}    # 黄
+COLOR_A_ONLY = {'bg_color': '#FEF1F5', 'font_color': '#9C0006'}      # 薄いピンク
+COLOR_B_ONLY = {'bg_color': '#EAF1FB', 'font_color': '#1F4E79'}      # 薄い青
+COLOR_MISMATCH = {'bg_color': '#FFF6D5', 'font_color': '#9C6500'}    # 薄い黄
+COLOR_MATCH = {'bg_color': '#EAF7EC', 'font_color': '#006100'}       # 薄い緑
 
-# ROW_STYLE_* -> 色（MATCH は無色のため None）
+# ROW_STYLE_* -> 色（全区分が淡色。HostPL-comparer と同じ配色セット）
 ROW_STYLE_COLORS = {
     ROW_STYLE_A_ONLY: COLOR_A_ONLY,
     ROW_STYLE_B_ONLY: COLOR_B_ONLY,
     ROW_STYLE_MISMATCH: COLOR_MISMATCH,
-    ROW_STYLE_MATCH: None,
+    ROW_STYLE_MATCH: COLOR_MATCH,
 }
 
 
 def row_style(kubun: str, a_count, b_count) -> str:
     """区分と個数から表示スタイル区分（ROW_STYLE_*）を返す。
 
-    - 区分が『A のみ』『B のみ』ならそのまま対応する区分を返す（青／緑）。
-    - 区分が『両方』の場合、A個数とB個数が一致すれば無色（MATCH）、
-      不一致（片方が欠損の場合も含む）なら黄（MISMATCH）。
+    - 区分が『A のみ』『B のみ』ならそのまま対応する区分を返す（薄いピンク／薄い青）。
+    - 区分が『両方』の場合、A個数とB個数が一致すれば薄い緑（MATCH）、
+      不一致（片方が欠損の場合も含む）なら薄い黄（MISMATCH）。
     """
     if kubun == KUBUN_A_ONLY:
         return ROW_STYLE_A_ONLY

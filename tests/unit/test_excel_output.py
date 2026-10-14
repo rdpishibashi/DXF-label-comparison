@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 
 from model.compare_labels import (
     compare_labels, summarize, summary_header, compare_labels_by_region,
-    build_region_summary_rows, COLOR_A_ONLY, COLOR_B_ONLY, COLOR_MISMATCH,
+    build_region_summary_rows, COLOR_A_ONLY, COLOR_B_ONLY, COLOR_MISMATCH, COLOR_MATCH,
 )
 from model.excel_output import (
     create_compare_excel_output, create_region_compare_excel_output, region_sheet_names,
@@ -46,7 +46,7 @@ def test_summary_numbers_use_thousands_separator():
 
 
 def test_row_colors():
-    """行の塗り: Aのみ=青／Bのみ=緑／両方で個数不一致=黄／一致=無色。"""
+    """行の塗り: Aのみ=薄いピンク／Bのみ=薄い青／両方で個数不一致=薄い黄／一致=薄い緑。"""
     df = compare_labels({'A1': 1, 'M': 1, 'X': 1}, {'B1': 1, 'M': 1, 'X': 2})
     wb = _load(create_compare_excel_output(df, summarize(df, summary_header(1, 1, '全部', 1))))
     ws = wb['All Labels diff']
@@ -54,7 +54,7 @@ def test_row_colors():
     assert fills['A1'].endswith(COLOR_A_ONLY['bg_color'][1:])
     assert fills['B1'].endswith(COLOR_B_ONLY['bg_color'][1:])
     assert fills['X'].endswith(COLOR_MISMATCH['bg_color'][1:])
-    assert fills['M'] in (None, '00000000')
+    assert fills['M'].endswith(COLOR_MATCH['bg_color'][1:])
 
 
 def test_region_output_one_sheet_per_region():
