@@ -208,12 +208,18 @@ def _named_files(files_a, files_b):
             [(B_PREFIX + f.name, f) for f in files_b])
 
 
-def _read_b_titles(named_b):
+def _read_b_titles(named_b, status_placeholder=None):
     """B のファイルごとのタイトル・サブタイトルを読む（{ファイルキー: (title, subtitle)}）。
     図番はファイル名を使うため抽出しない。`extract_labels()` には図番・タイトルの
-    オプションを必ず両方セットで渡す（片方だけだと同一タイトルブロック制限が無効になる）。"""
+    オプションを必ず両方セットで渡す（片方だけだと同一タイトルブロック制限が無効になる）。
+    `status_placeholder` を渡すと「ラベルを抽出中」と同じ形式で進行状況を表示する。"""
     titles = {}
-    for key, uf in named_b:
+    start_time = time.time()
+    total = len(named_b)
+    for idx, (key, uf) in enumerate(named_b, start=1):
+        if status_placeholder is not None:
+            status_placeholder.text(
+                f"タイトルを抽出中: {key}（{idx}/{total}件、経過 {time.time() - start_time:.1f} 秒）")
         with region_selection.temp_dxf_file(uf) as tmp:
             _labels, info = extract_labels(
                 tmp, extract_drawing_numbers_option=True, extract_title_option=True,
@@ -229,7 +235,10 @@ def _b_titles(named_b):
     cache = st.session_state.get('cmp_b_titles')
     if cache is None or cache['signature'] != signature:
         with st.spinner(f'Bの{len(named_b)}個の図面のタイトルを読み込み中...'):
-            cache = {'signature': signature, 'titles': _read_b_titles(named_b)}
+            status_placeholder = st.empty()
+            cache = {'signature': signature,
+                     'titles': _read_b_titles(named_b, status_placeholder)}
+            status_placeholder.empty()
         st.session_state['cmp_b_titles'] = cache
         st.session_state.pop('cmp_b_initial', None)
     return cache['signature'], cache['titles']
