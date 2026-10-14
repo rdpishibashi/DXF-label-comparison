@@ -6,7 +6,7 @@
 """
 import pandas as pd
 
-from model.ref_designator import is_ref_designator_label
+from model.ref_designator import designator_mark
 
 CANDIDATE_COLUMN = '機器符号候補'
 DIFF_COLUMNS = [CANDIDATE_COLUMN, 'ラベル', '区分', 'A個数', 'B個数']
@@ -98,12 +98,14 @@ def aggregate_region_labels(results: dict, keys, regions) -> dict:
     return agg
 
 
-def compare_labels(a: dict, b: dict) -> pd.DataFrame:
+def compare_labels(a: dict, b: dict, master_index=None) -> pd.DataFrame:
     """{比較キー: 個数} 2 つを比較し、差分 DataFrame を返す。
 
     - columns: DIFF_COLUMNS（機器符号候補・ラベル・区分・A個数・B個数）
-    - 機器符号候補: 比較キーが機器符号候補なら 'Y'、それ以外は None
-      （`ref_designator.is_ref_designator_label()`、DXF-extract-labels と同じ判定）
+    - 機器符号候補: 比較キーに対する `ref_designator.designator_mark()`
+      （DXF-extract-labels と同じ判定）。'DEF'（機器符号一覧 `master_index` に
+      含まれる）／'CAN'（候補パターンに一致）／None（どちらでもない。空欄）。
+      `master_index=None`（鍵なし等）なら DEF は出ず CAN／None のみ。行は絞り込まない
     - 区分 ∈ {'A のみ', 'B のみ', '両方'}
     - 無い側の個数は pd.NA
     - ラベル昇順（sorted）
@@ -114,7 +116,7 @@ def compare_labels(a: dict, b: dict) -> pd.DataFrame:
         in_a, in_b = lbl in a, lbl in b
         kubun = KUBUN_BOTH if (in_a and in_b) else (KUBUN_A_ONLY if in_a else KUBUN_B_ONLY)
         rows.append({
-            CANDIDATE_COLUMN: 'Y' if is_ref_designator_label(lbl) else None,
+            CANDIDATE_COLUMN: designator_mark(lbl, master_index),
             'ラベル': lbl,
             '区分': kubun,
             'A個数': a.get(lbl, pd.NA),
@@ -165,7 +167,8 @@ def summarize(df: pd.DataFrame, header: dict) -> dict:
     return result
 
 
-def compare_labels_by_region(a_by_region: dict, b_by_region: dict, regions: list):
+def compare_labels_by_region(a_by_region: dict, b_by_region: dict, regions: list,
+                             master_index=None):
     """指定した領域名（regions、表示順）ごとに `compare_labels()` を実行し、
     先頭に『領域名』列を持つ1つの DataFrame に結合する。
 
@@ -178,7 +181,8 @@ def compare_labels_by_region(a_by_region: dict, b_by_region: dict, regions: list
     frames = []
     metrics_by_region: dict = {}
     for region in regions:
-        region_df = compare_labels(a_by_region.get(region, {}), b_by_region.get(region, {}))
+        region_df = compare_labels(a_by_region.get(region, {}), b_by_region.get(region, {}),
+                                     master_index=master_index)
         metrics_by_region[region] = summarize_metrics(region_df)
         region_df = region_df.copy()
         region_df.insert(0, '領域名', region)
@@ -204,7 +208,11 @@ def blank_repeated_column(df: pd.DataFrame, column: str) -> pd.DataFrame:
     return out
 
 
-def build_region_summary_rows(metrics_by_region: dict, header: dict) -> list:
+OVERALL_BLOCK_NAME = '全体（除外後）'
+
+
+def build_region_summary_rows(metrics_by_region: dict, header: dict,
+                              overall_metrics: dict = None) -> list:
     """領域名ごとの `summarize_metrics()` 結果から、サマリーシート用の行リスト
     （領域名・項目・値の3キーを持つ dict のリスト）を構築する。
 
@@ -212,9 +220,16 @@ def build_region_summary_rows(metrics_by_region: dict, header: dict) -> list:
     続けて領域名ごとに5項目（A ユニークラベル数〜両方）のブロックを
     metrics_by_region の順で並べる。各領域ブロックの**先頭行だけ**領域名を入れ、
     同じブロック内の残り4行は空欄にする（ユーザー指定のレイアウト）。
+
+    `overall_metrics`（`summarize_metrics()` の戻り値）を渡すと、領域ごとのブロックの
+    前に『全体（除外後）』ブロック（図面全体から『除外』領域内のラベルを除いた比較。
+    `All Labels diff` シートの集計）を置く。
     """
     rows = [{'領域名': '', '項目': k, '値': v} for k, v in header.items()]
-    for region, metrics in metrics_by_region.items():
+    blocks = dict(metrics_by_region)
+    if overall_metrics is not None:
+        blocks = {OVERALL_BLOCK_NAME: overall_metrics, **blocks}
+    for region, metrics in blocks.items():
         for i, (key, value) in enumerate(metrics.items()):
             rows.append({'領域名': region if i == 0 else '', '項目': key, '値': value})
     return rows

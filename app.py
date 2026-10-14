@@ -1,3 +1,4 @@
+import os
 import time
 import traceback
 
@@ -5,21 +6,26 @@ import streamlit as st
 import pandas as pd
 
 from model.region_detector import collect_unique_region_candidate_names
-from model import ref_designator
+from model.extract_labels import extract_labels
+from model import designator_master, ref_designator
 from model.compare_labels import (
     aggregate_labels, aggregate_region_labels, compare_labels, summarize, summary_header,
     compare_labels_by_region, build_region_summary_rows,
-    blank_repeated_column, row_style, ROW_STYLE_COLORS,
+    blank_repeated_column, row_style, ROW_STYLE_COLORS, summarize_metrics,
 )
 from model.excel_output import (
     create_compare_excel_output, create_region_compare_excel_output, region_sheet_names,
     SUMMARY_SHEET, ALL_LABELS_SHEET,
 )
-from model.drawing_filter import select_files, FILTER_OPTIONS
+from model.drawing_filter import (
+    FILTER_OPTIONS, FILTER_UNIT_ONLY, initial_selection, filter_condition_label,
+)
 from config import region_detection_config
 from view import region_selection
 
 st.set_page_config(page_title="DXF Label Comparison", page_icon="🔍", layout="wide")
+
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 OUTPUT_FILENAME = 'label_comparison.xlsx'
 A_PREFIX = '[A] '
@@ -28,12 +34,39 @@ B_PREFIX = '[B] '
 # 比較結果（「展開図-結線図比較」実行時に生成し、「新しい比較を開始」で消す）
 _RESULT_KEYS = [
     'cmp_diff', 'cmp_summary', 'cmp_output', 'cmp_is_region_mode', 'cmp_region_metrics',
+    'cmp_all_diff', 'cmp_overall_metrics', 'cmp_excluded_regions',
     'cmp_preview_expanded', 'cmp_preview_sheet',
     'cmp_download_done',
 ]
 # 領域検出の状態（「領域を検出」の再実行・入力ファイルの変更・オプションOFFで消す）
 _REGION_KEYS = [region_selection.ANALYSES_KEY, region_selection.CONFIRMED_KEY,
                 'cmp_detected_files']
+
+
+def _resolve_master_index():
+    """機器符号一覧の索引（`designator_master.DesignatorMasterIndex`）を解決する
+    （DXF-extract-labels の `_resolve_master_index()` と同じ。鍵は
+    `st.secrets['DESIGNATOR_MASTER_KEY']` → 環境変数の順）。鍵・ダイジェストファイルが
+    無い、または鍵が一覧生成時と異なる場合は索引が `None` になり、「機器符号候補」列は
+    DEF なし（CAN／空欄のみ）になる。戻り値: (master_index または None, 状態メッセージ)。"""
+    try:
+        secret = st.secrets.get('DESIGNATOR_MASTER_KEY')
+    except Exception:
+        secret = None
+    if not secret:
+        secret = os.environ.get('DESIGNATOR_MASTER_KEY')
+
+    digest_path = os.path.join(_APP_DIR, 'assets', 'designator_digests.txt')
+
+    if not secret:
+        return None, "機器符号一覧が未設定のため DEF(defined) 判定は行われていません"
+    if not os.path.isfile(digest_path):
+        return None, ("機器符号一覧のダイジェストファイルが見つからないため "
+                      "DEF(defined) 判定は行われていません")
+    index = designator_master.load_index(digest_path, secret)
+    if index is None:
+        return None, "鍵が機器符号一覧の生成時と異なるため DEF(defined) 判定は行われていません"
+    return index, f"機器符号一覧: {len(index)}件を読み込み済み（DEF判定あり）"
 
 
 def _handle_error(e):
@@ -124,22 +157,28 @@ def _render_intro():
         st.info("\n".join([
             "ラベル抽出は DXF-extract-labels と同じ処理です（図面枠内・図面情報枠外の"
             "全ラベル）。ラベルの「(」「（」以降は除いて比較します（例: R10(2.2K) と R10 は"
-            "同じラベル）。機器符号パターンに一致するラベルには「機器符号候補」に Y を付けます。",
+            "同じラベル）。「機器符号候補」列には、機器符号一覧にあるラベルに DEF、"
+            "機器符号の候補パターンに一致するラベルに CAN を付けます（どちらでもないラベルは空欄。"
+            "比較対象はすべてのラベルです）。",
             "",
             "**使用手順：**",
             "1. A（展開接続図）・B（UNIT内結線図）のDXFファイルをアップロードします"
             "（複数可・フォルダ可。DXF以外のファイルは無視されます）",
-            "2. Bの対象範囲（タイトルによる絞り込み）を選びます",
+            "2. Bの対象範囲を選びます。「UNIT内結線図のみ」を選ぶとBの図面一覧"
+            "（図番・タイトル・サブタイトル）が表示され、タイトルが「UNIT内結線図」の図面に"
+            "チェックが付きます。チェックを付け外しして比較対象を手作業で変更できます",
             "3. 「指定領域で比較する」をONにした場合は、「領域を検出」ボタンで矩形領域を検出し、"
-            "「領域一覧」（A・Bに共通する領域名）で比較したい領域名にチェックを入れます。"
+            "「領域一覧」（A・Bに共通する領域名）で、比較したい領域名を「特定」にチェックし、"
+            "比較から外したい領域（凡例・表など）を「除外」にチェックします。"
             "チェックで決定できなかった領域は「領域の確認」で個別に選択します",
             "4. 「展開図-結線図比較」ボタンで比較し、結果をExcelでダウンロードできます",
             "",
             "**Excelファイルの内容：**",
             "- Summaryシート：ファイル数・Bの絞り込み条件・比較件数（指定領域での比較時は領域ごと）",
             "- All Labels diffシート：機器符号候補・ラベル・区分（Aのみ/Bのみ/両方）・A個数・B個数",
-            "- 指定領域での比較時は、All Labels diffシートの代わりに領域ごとのシート"
-            "（シート名＝領域名。Excelで使えない文字 \\ / * ? : [ ] は _ に置換）",
+            "- 指定領域での比較時は、All Labels diffシート（「除外」領域内のラベルを除いた図面全体）"
+            "に続けて、「特定」した領域ごとのシート（シート名＝領域名。"
+            "Excelで使えない文字 \\ / * ? : [ ] は _ に置換）",
         ]))
 
 
@@ -155,6 +194,8 @@ def _render_upload_section(locked):
         files_b = _dxf_only(st.file_uploader(
             "B: UNIT内結線図（複数可，フォルダ可）", accept_multiple_files=True,
             key=f"uploader_b_{ver}", disabled=locked))
+        if st.session_state.get('b_filter_mode') not in FILTER_OPTIONS:
+            st.session_state.pop('b_filter_mode', None)   # 削除済みの選択肢が残っていたら既定に戻す
         filter_mode = st.radio("Bの対象範囲（タイトルで絞り込み）", FILTER_OPTIONS,
                                key='b_filter_mode', horizontal=True, disabled=locked)
     return files_a, files_b, filter_mode
@@ -167,6 +208,61 @@ def _named_files(files_a, files_b):
             [(B_PREFIX + f.name, f) for f in files_b])
 
 
+def _read_b_titles(named_b):
+    """B のファイルごとのタイトル・サブタイトルを読む（{ファイルキー: (title, subtitle)}）。
+    図番はファイル名を使うため抽出しない。`extract_labels()` には図番・タイトルの
+    オプションを必ず両方セットで渡す（片方だけだと同一タイトルブロック制限が無効になる）。"""
+    titles = {}
+    for key, uf in named_b:
+        with region_selection.temp_dxf_file(uf) as tmp:
+            _labels, info = extract_labels(
+                tmp, extract_drawing_numbers_option=True, extract_title_option=True,
+                original_filename=uf.name)
+        titles[key] = (info.get('title'), info.get('subtitle'))
+    return titles
+
+
+def _b_titles(named_b):
+    """B のタイトル・サブタイトルを読み込む（B のファイル構成〈名前とサイズ〉が変わった
+    ときだけ読み直す）。"""
+    signature = tuple(sorted((key, uf.size) for key, uf in named_b))
+    cache = st.session_state.get('cmp_b_titles')
+    if cache is None or cache['signature'] != signature:
+        with st.spinner(f'Bの{len(named_b)}個の図面のタイトルを読み込み中...'):
+            cache = {'signature': signature, 'titles': _read_b_titles(named_b)}
+        st.session_state['cmp_b_titles'] = cache
+        st.session_state.pop('cmp_b_initial', None)
+    return cache['signature'], cache['titles']
+
+
+def _render_b_drawing_list(named_b, filter_mode, locked):
+    """「Bの対象範囲」が『UNIT内結線図のみ』のとき、Bの図面一覧（先頭に対象チェックボックス、
+    図番〈ファイル名〉・タイトル・サブタイトル）を表示し、手作業で選択を変更できるようにする。
+    初期のチェックはタイトルが『UNIT内結線図』の図面。
+    戻り値: {ファイルキー: チェック} または None（『全部』のときは一覧を出さない）。"""
+    if filter_mode != FILTER_UNIT_ONLY:
+        return None
+    signature, titles = _b_titles(named_b)
+    initial = initial_selection({key: t for key, (t, _sub) in titles.items()})
+    st.session_state['cmp_b_initial'] = initial
+
+    rows = [{'対象': initial[key], '図番': os.path.splitext(uf.name)[0],
+             'タイトル': titles[key][0] or '', 'サブタイトル': titles[key][1] or '',
+             '_key': key}
+            for key, uf in named_b]
+    rows.sort(key=lambda r: r['図番'])
+    df = pd.DataFrame(rows)
+    ver = st.session_state.get('uploader_version', 0)
+    st.caption("Bの図面一覧（チェックした図面が比較対象です。初期状態はタイトルが"
+               "「UNIT内結線図」の図面）")
+    edited = st.data_editor(
+        df.drop(columns='_key'), hide_index=True, width='stretch', disabled=locked or
+        ['図番', 'タイトル', 'サブタイトル'],
+        column_config={'対象': st.column_config.CheckboxColumn('対象', width=64)},
+        key=f"b_drawing_list_{ver}_{hash(signature)}")
+    return {key: bool(checked) for key, checked in zip(df['_key'], edited['対象'])}
+
+
 def _common_region_names(analyses):
     """A・B それぞれの領域名候補の積（ABC順）。片側にしか無い領域名は比較しても全件が
     『A のみ』『B のみ』になるため「領域一覧」に出さない（ユーザー指定）。"""
@@ -174,6 +270,16 @@ def _common_region_names(analyses):
     b = {k: v for k, v in analyses.items() if k.startswith(B_PREFIX)}
     return sorted(set(collect_unique_region_candidate_names(a))
                   & set(collect_unique_region_candidate_names(b)))
+
+
+def _region_targets(analyses):
+    """指定領域モードの比較対象: ((「特定」領域名のABC順リスト), (「除外」領域名の集合))。
+    どちらも A・B 共通名のみ。同じ名称で『特定』『除外』を両方ONにした場合は『除外』を優先する
+    （DXF-extract-labels と同じ）。"""
+    common = set(_common_region_names(analyses))
+    excluded = region_selection.global_excluded_region_names() & common
+    regions = sorted((region_selection.global_checked_region_names() & common) - excluded)
+    return regions, excluded
 
 
 def _render_region_section(named_a, named_b, locked):
@@ -217,14 +323,16 @@ def _render_region_section(named_a, named_b, locked):
     if not common_names and any(an.get('regions') for an in analyses.values()):
         st.warning("A・Bに共通する領域名がありません。")
         return True, False
-    region_selection.render_global_region_names_section(common_names, locked, action='比較')
+    region_selection.render_global_region_names_section(
+        common_names, locked, action='比較', allow_exclude=True)
     if not st.session_state.get(region_selection.CONFIRMED_KEY):
         return True, False
     region_selection.render_region_confirmation_section(analyses, locked, action='比較')
     return True, True
 
 
-def _run_comparison(named_a, named_b, filter_mode, region_mode):
+def _run_comparison(named_a, named_b, filter_mode, region_mode, b_selection, master_index):
+    """`b_selection`: Bの図面一覧のチェック状態（{ファイルキー: bool}。『全部』のときは None）。"""
     frame_lineweight = int(region_selection.build_region_cfg(
         region_detection_config)['frame_lineweight'])
     with st.spinner(f'{len(named_a) + len(named_b)}個のDXFファイルを処理中...'):
@@ -235,33 +343,48 @@ def _run_comparison(named_a, named_b, filter_mode, region_mode):
             named_a + named_b, frame_lineweight, analyses=analyses,
             status_placeholder=status_placeholder, start_time=start_time)
         if region_mode:
+            regions, excluded = _region_targets(analyses)
             name_selections = {
                 key: region_selection.gather_name_selections(key, analyses[key])
                 for key in ref_data
             }
             results = ref_designator.build_ref_designator_region_results(
-                ref_data, analyses, name_selections)
+                ref_data, analyses, name_selections, master_index=master_index,
+                excluded_names=excluded)
         else:
-            results = ref_designator.build_ref_designator_final(ref_data)
+            results = ref_designator.build_ref_designator_final(
+                ref_data, master_index=master_index)
         status_placeholder.empty()
 
     a_keys = [key for key, _f in named_a]
     b_all = [key for key, _f in named_b]
-    b_keys = select_files({key: results[key].get('title') for key in b_all}, filter_mode)
-    header = summary_header(len(a_keys), len(b_all), filter_mode, len(b_keys))
+    if b_selection is None:   # 『全部』
+        b_keys = b_all
+    else:
+        b_keys = [key for key in b_all if b_selection.get(key)]
+    condition = filter_condition_label(
+        filter_mode, st.session_state.get('cmp_b_initial', {}), b_selection or {})
+    header = summary_header(len(a_keys), len(b_all), condition, len(b_keys))
 
     if region_mode:
-        common = set(_common_region_names(analyses))
-        regions = sorted(region_selection.global_checked_region_names() & common)
+        # 図面全体（『除外』領域内のラベルを除く。results の rows は除外後の全ラベル）
+        all_df = compare_labels(aggregate_labels(results, a_keys),
+                                aggregate_labels(results, b_keys), master_index=master_index)
         diff_df, metrics = compare_labels_by_region(
             aggregate_region_labels(results, a_keys, regions),
-            aggregate_region_labels(results, b_keys, regions), regions)
-        summary = build_region_summary_rows(metrics, header)
-        output = create_region_compare_excel_output(diff_df, summary, regions)
+            aggregate_region_labels(results, b_keys, regions), regions,
+            master_index=master_index)
+        header['除外した領域'] = '、'.join(sorted(excluded)) if excluded else 'なし'
+        overall = summarize_metrics(all_df)
+        summary = build_region_summary_rows(metrics, header, overall_metrics=overall)
+        output = create_region_compare_excel_output(diff_df, summary, regions, all_df=all_df)
         st.session_state['cmp_region_metrics'] = metrics
+        st.session_state['cmp_all_diff'] = all_df
+        st.session_state['cmp_overall_metrics'] = overall
+        st.session_state['cmp_excluded_regions'] = sorted(excluded)
     else:
         diff_df = compare_labels(aggregate_labels(results, a_keys),
-                                 aggregate_labels(results, b_keys))
+                                 aggregate_labels(results, b_keys), master_index=master_index)
         summary = summarize(diff_df, header)
         output = create_compare_excel_output(diff_df, summary)
     st.session_state['cmp_diff'] = diff_df
@@ -277,6 +400,7 @@ def _preview_sheets(diff_df, summary):
     （指定領域での比較時は領域ごと、『領域名』列なし）。"""
     sheets = [(SUMMARY_SHEET, None)]
     if st.session_state.get('cmp_is_region_mode'):
+        sheets.append((ALL_LABELS_SHEET, st.session_state['cmp_all_diff']))
         regions = list(st.session_state.get('cmp_region_metrics', {}))
         for region, name in region_sheet_names(regions).items():
             sheets.append((name, diff_df[diff_df['領域名'] == region].drop(columns='領域名')))
@@ -312,7 +436,7 @@ def _render_preview(diff_df, summary):
             )
 
 
-def _render_results_section():
+def _render_results_section(master_index_status=None):
     diff_df = st.session_state.get('cmp_diff')
     if diff_df is None:
         return
@@ -321,14 +445,12 @@ def _render_results_section():
     st.subheader("比較結果")
     if st.session_state.get('cmp_is_region_mode'):
         metrics = st.session_state.get('cmp_region_metrics', {})
-        totals = {}
-        for m in metrics.values():
-            for key, value in m.items():
-                totals[key] = totals.get(key, 0) + value
+        overall = st.session_state.get('cmp_overall_metrics', {})
+        excluded = st.session_state.get('cmp_excluded_regions', [])
         st.info(
-            f"対象領域: {len(metrics):,}件　/　"
-            f"A のみ: {totals.get('A のみ', 0):,}件　/　B のみ: {totals.get('B のみ', 0):,}件　/　"
-            f"両方: {totals.get('両方', 0):,}件"
+            f"対象領域: {len(metrics):,}件　/　除外領域: {len(excluded):,}件　/　"
+            f"全体（除外後）　A のみ: {overall.get('A のみ', 0):,}件　/　"
+            f"B のみ: {overall.get('B のみ', 0):,}件　/　両方: {overall.get('両方', 0):,}件"
         )
     else:
         st.info(
@@ -340,6 +462,8 @@ def _render_results_section():
         )
         if summary['B 対象ファイル数'] == 0:
             st.warning("Bの対象範囲に該当するファイルがありません（Bの全ラベルが比較対象外）。")
+    if master_index_status:
+        st.caption(master_index_status)
     _render_preview(diff_df, summary)
 
     download_done = st.session_state.get('cmp_download_done', False)
@@ -355,7 +479,7 @@ def _render_results_section():
 
     if st.button("🔄 新しい比較を開始", key="restart_button",
                  type="primary" if download_done else "secondary"):
-        _clear_session_keys(keys=_RESULT_KEYS)
+        _clear_session_keys(keys=_RESULT_KEYS + ['cmp_b_titles', 'cmp_b_initial'])
         _clear_region_state()
         st.session_state['uploader_version'] = st.session_state.get('uploader_version', 0) + 1
         st.rerun()
@@ -366,8 +490,9 @@ def main():
     - 比較結果表示中（locked）: 入力・オプション・領域一覧・領域の確認は表示するが操作不可。
       「新しい比較を開始」でのみ次のサイクルへ進める
     - 指定領域で比較する OFF: 「展開図-結線図比較」ボタンのみ
-    - 指定領域で比較する ON: 「領域を検出」→「領域一覧」→「領域選択を完了」→
+    - 指定領域で比較する ON: 「領域を検出」→「領域一覧」（特定・除外）→「領域選択を完了」→
       「領域の確認」（必要な場合のみ）→「展開図-結線図比較」
+    - Bの対象範囲が「UNIT内結線図のみ」: Bの図面一覧（チェックで手動変更可）を表示
     """
     _render_intro()
     locked = st.session_state.get('cmp_diff') is not None
@@ -378,21 +503,34 @@ def main():
         return
     st.success(f"A: {len(files_a)}個 / B: {len(files_b)}個のDXFファイルが選択されました")
     named_a, named_b = _named_files(files_a, files_b)
+    master_index, master_index_status = _resolve_master_index()
+
+    try:
+        b_selection = _render_b_drawing_list(named_b, filter_mode, locked)
+    except Exception as e:
+        _handle_error(e)
+        return
 
     st.subheader("オプション")
     region_mode, ready = _render_region_section(named_a, named_b, locked)
 
     if not locked and ready:
-        no_region_selected = region_mode and not region_selection.global_checked_region_names()
+        # 指定領域モードは、比較する「特定」領域も「除外」領域も無い間は実行できない
+        # （『除外』だけの指定なら、除外後の図面全体の比較ができる）
+        no_region_selected = False
+        if region_mode:
+            regions, excluded = _region_targets(st.session_state[region_selection.ANALYSES_KEY])
+            no_region_selected = not regions and not excluded
         if st.button("展開図-結線図比較", type='primary', disabled=no_region_selected,
                      key='compare_run'):
             try:
-                _run_comparison(named_a, named_b, filter_mode, region_mode)
+                _run_comparison(named_a, named_b, filter_mode, region_mode, b_selection,
+                                master_index)
                 st.rerun()
             except Exception as e:
                 _handle_error(e)
 
-    _render_results_section()
+    _render_results_section(master_index_status=master_index_status)
 
 
 if __name__ == '__main__':

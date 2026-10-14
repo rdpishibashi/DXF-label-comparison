@@ -30,7 +30,7 @@ def test_sheet_names_and_columns():
     assert wb.sheetnames == ['Summary', 'All Labels diff']
     rows = _values(wb['All Labels diff'])
     assert rows[0] == ['機器符号候補', 'ラベル', '区分', 'A個数', 'B個数']
-    assert rows[1] == ['Y', 'CB1', '両方', 1, 1]
+    assert rows[1] == ['CAN', 'CB1', '両方', 1, 1]
     assert rows[2] == [None, '電源', 'B のみ', None, 2]
 
 
@@ -85,3 +85,18 @@ def test_region_sheet_names_sanitize_truncate_and_dedupe():
     assert (names['X:Y'], names['X?Y']) == ('X_Y', 'X_Y(2)')
     assert names['A' * 40] == 'A' * 31
     assert all(len(n) <= 31 for n in names.values())
+
+
+def test_region_output_places_all_labels_sheet_after_summary():
+    """指定領域モード: Summary → All Labels diff（除外後の図面全体）→ 領域ごとのシート。
+    領域名が『All Labels diff』でも領域シートとは別シートになる（衝突回避）。"""
+    regions = ['All Labels diff', 'R2']
+    df, metrics = compare_labels_by_region(
+        {'All Labels diff': {'CB1': 1}, 'R2': {'CB2': 1}}, {'R2': {'CB2': 1}}, regions)
+    all_df = compare_labels({'CB1': 1, 'CB2': 1}, {'CB2': 1})
+    summary = build_region_summary_rows(
+        metrics, summary_header(1, 1, '全部', 1), overall_metrics={
+            'A ユニークラベル数': 2, 'B ユニークラベル数': 1, 'A のみ': 1, 'B のみ': 0, '両方': 1})
+    wb = _load(create_region_compare_excel_output(df, summary, regions, all_df=all_df))
+    assert wb.sheetnames == ['Summary', 'All Labels diff', 'All Labels diff(2)', 'R2']
+    assert [r[1] for r in _values(wb['All Labels diff'])[1:]] == ['CB1', 'CB2']

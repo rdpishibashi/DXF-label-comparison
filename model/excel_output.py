@@ -2,7 +2,7 @@
 
 シート構成:
 - 通常: Summary → All Labels diff
-- 指定領域での比較: Summary → 領域ごとのシート（シート名＝領域名。Excel で使えない
+- 指定領域での比較: Summary → All Labels diff（『除外』領域内を除いた図面全体）→ 領域ごとのシート（シート名＝領域名。Excel で使えない
   文字は '_' に置換・31文字に切り詰め・重複時は '(2)' 等を付与。`region_sheet_names()`）
 
 - Summary: 項目・値（指定領域での比較時は 領域名・項目・値）。数値は3桁区切り（#,##0）
@@ -29,7 +29,7 @@ def region_sheet_names(regions) -> dict:
     """{領域名: シート名} を返す（regions の順）。Excel のシート名に使えない文字
     （\\ / * ? : [ ]）は '_' に置換し、31文字に切り詰める。Summary や他の領域と
     （大文字小文字を区別せず）重複する場合は末尾に '(2)'・'(3)'… を付ける。"""
-    used = {SUMMARY_SHEET.lower()}
+    used = {SUMMARY_SHEET.lower(), ALL_LABELS_SHEET.lower()}
     names = {}
     for region in regions:
         base = _INVALID_SHEET_CHARS.sub('_', str(region)).strip("'") or '_'
@@ -52,16 +52,21 @@ def create_compare_excel_output(diff_df: pd.DataFrame, summary: dict) -> bytes:
 
 
 def create_region_compare_excel_output(diff_df: pd.DataFrame, summary_rows: list,
-                                       regions: list) -> bytes:
+                                       regions: list, all_df: pd.DataFrame = None) -> bytes:
     """指定領域での比較結果の Excel ファイルを bytes で返す。
 
     `diff_df` は `compare_labels_by_region()` の戻り値（『領域名』列付き）。
     `regions` の順に領域ごとのシート（シート名は `region_sheet_names()`、『領域名』列は
     持たない）を作る。該当ラベルが無い領域もヘッダーのみのシートとして出力する。
     Summary シートは領域名・項目・値の3列（`build_region_summary_rows()` の戻り値）。
+
+    `all_df`（図面全体から『除外』領域内のラベルを除いた比較。`compare_labels()` の
+    戻り値）を渡すと、Summary の次に `All Labels diff` シートを置く（領域名と衝突しない）。
     """
     names = region_sheet_names(regions)
     sheets = [(names[region], diff_df[diff_df['領域名'] == region]) for region in regions]
+    if all_df is not None:
+        sheets.insert(0, (ALL_LABELS_SHEET, all_df))
     return _create_excel_output(summary_rows, sheets)
 
 
