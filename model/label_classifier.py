@@ -340,6 +340,9 @@ NON_DESIGNATOR_PATTERNS = (
 # （例 `R10`・`N24`・`P24`・`D4`・`X05`・`M10`）。A・C・L・Q・U・F は従来どおり機器符号候補。
 OTHER_PATTERNS = (
     re.compile(r'^[BDEGHIJKMNOPRSTVWXYZ][0-9]{1,2}$'),
+    # AWG+数字（ケーブル線径。例 `AWG12`。2026-10-14 ユーザー指定。数字なしの `AWG` は
+    # 英字のみの除外パターン wire_gauge で OTHER）
+    re.compile(r'^AWG[0-9]+$'),
 )
 
 # 上の形に一致しても、追加機器符号（`CN.*`・`DIO.*`・`CIR.*`・`MC.*` 等。コネクタ・端子台など）に
@@ -362,7 +365,7 @@ def classify_label(text: str) -> str:
     判定用文字列は `_judgment_text()`（括弧・` **`・Ω語より前）で、判定順は次のとおり
     （最初に当たったもので決まる）:
       1. 空・英大文字1字・末尾が `+`/`-` → `OTHER`
-      1a. `OTHER_PATTERNS`（A・C・L・Q・U・F 以外の英大文字1字+数字1〜2桁。例 `R10`・`N24`）→ `OTHER`
+      1a. `OTHER_PATTERNS`（A・C・L・Q・U・F 以外の英大文字1字+数字1〜2桁。例 `R10`・`N24`、および `AWG`+数字）→ `OTHER`
       1b. `NON_DESIGNATOR_PATTERNS`（英字+数字+英字+数字 の形。例 `DC19A4`）→ `REGION_NAME`
           （ただし `CN.*`・`DIO.*` 等の追加機器符号に一致するものは機器符号のまま）
       2. 英字のみ以外の候補パターン（`PATTERN_CATEGORIES`）に一致 → `DESIGNATOR`
