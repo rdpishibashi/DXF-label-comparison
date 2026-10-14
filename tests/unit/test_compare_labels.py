@@ -119,5 +119,5 @@ def test_blank_repeated_column():
     ('両方', 1, pd.NA, ROW_STYLE_MISMATCH),
 ])
 def test_row_style(kubun, a, b, expected):
-    """区分・個数一致による表示スタイル（青/緑/黄/無色）。"""
+    """区分・個数一致による表示スタイル（薄いピンク/薄い青/薄い黄/薄い緑）。"""
     assert row_style(kubun, a, b) == expected
