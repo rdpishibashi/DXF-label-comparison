@@ -418,6 +418,43 @@ def _preview_sheets(diff_df, summary):
     return sheets
 
 
+CANDIDATE_COLUMN = '機器符号候補'
+CANDIDATE_BLANK = '（空欄）'
+_CANDIDATE_ORDER = ('DEF', 'CAN')
+
+
+def candidate_filter_options(series):
+    """「機器符号候補」列に実際にある値を `DEF` → `CAN` → `（空欄）` の順で返す
+    （画面の絞り込み選択欄用。その他の値があれば最後に追加）。"""
+    present = {CANDIDATE_BLANK if (pd.isna(v) or str(v).strip() == '') else str(v)
+               for v in series}
+    ordered = [v for v in _CANDIDATE_ORDER if v in present]
+    ordered += sorted(v for v in present if v not in _CANDIDATE_ORDER and v != CANDIDATE_BLANK)
+    if CANDIDATE_BLANK in present:
+        ordered.append(CANDIDATE_BLANK)
+    return ordered
+
+
+def filter_by_candidate(df, selected):
+    """「機器符号候補」列が `selected`（`candidate_filter_options()` の値）に含まれる行だけを
+    返す（index は保持）。表示専用で、Excel出力には使わない。"""
+    keys = df[CANDIDATE_COLUMN].apply(
+        lambda v: CANDIDATE_BLANK if (pd.isna(v) or str(v).strip() == '') else str(v))
+    return df[keys.isin(set(selected))]
+
+
+def render_candidate_filter(df, key):
+    """表の上に「機器符号候補」の絞り込み選択欄を出し、絞り込み後の df を返す。
+    列が無い、または値が無いときは選択欄を出さず df をそのまま返す。初期状態は全選択。"""
+    if CANDIDATE_COLUMN not in df.columns or df.empty:
+        return df
+    options = candidate_filter_options(df[CANDIDATE_COLUMN])
+    # 選択肢の構成が変わったとき（新しい抽出結果など）に古い選択が残らないよう、key に含める
+    selected = st.pills(CANDIDATE_COLUMN, options, selection_mode='multi',
+                        default=options, key=f"{key}:{'|'.join(options)}")
+    return filter_by_candidate(df, selected or [])
+
+
 def _render_preview(diff_df, summary):
     """「比較結果プレビュー」（開閉式）: DXF-extract-labels の「抽出結果プレビュー」と
     同じく、シートをドロップダウンで選んで表示する。開閉状態はシート選択時のみ
@@ -437,10 +474,11 @@ def _render_preview(diff_df, summary):
                 {'項目': k, '値': v} for k, v in summary.items()]
             st.dataframe(_summary_for_display(rows), width='stretch', hide_index=True)
         else:
+            filtered = render_candidate_filter(df, key=f"cmp_cand_filter_{selected}")
             st.dataframe(
-                _for_display(df).style.apply(_row_style_factory(df), axis=1),
+                _for_display(filtered).style.apply(_row_style_factory(df), axis=1),
                 width='stretch', hide_index=True,
-                # 値は Y か空欄だけなので、見出し「機器符号候補」がちょうど収まる幅に固定する
+                # 値は DEF/CAN か空欄だけなので、見出し「機器符号候補」がちょうど収まる幅に固定する
                 column_config={'機器符号候補': st.column_config.Column(width=100)},
             )
 
