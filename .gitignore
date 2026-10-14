@@ -202,3 +202,6 @@ log*.txt
 /CLAUDE.md
 /docs/
 /backup_docs
+
+# Local secrets (designator master key) — never commit
+/.streamlit/secrets.toml

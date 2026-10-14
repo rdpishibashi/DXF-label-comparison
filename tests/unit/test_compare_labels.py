@@ -29,10 +29,32 @@ def test_basic_kubun_assignment():
 
 
 def test_candidate_column_uses_ref_designator_judgment():
-    """機器符号候補列は DXF-extract-labels と同じ判定（Y／None）を付ける。"""
-    df = compare_labels({'CB001': 1, '電源': 1}, {})
-    assert _row(df, 'CB001')['機器符号候補'] == 'Y'
+    """機器符号候補列は DXF-extract-labels と同じ判定（CAN／None）を付け、
+    候補でない行も絞り込まずに残す（master_index なしでは DEF は出ない）。"""
+    df = compare_labels({'CB001': 1, '電源': 1, 'R10': 1}, {})
+    assert _row(df, 'CB001')['機器符号候補'] == 'CAN'
     assert _row(df, '電源')['機器符号候補'] is None
+    assert _row(df, 'R10')['機器符号候補'] is None   # A・C・L・Q・U・F 以外の英字1字+数字は OTHER
+    assert len(df) == 3
+
+
+class _StubMasterIndex:
+    """機器符号一覧の索引のスタブ（`contains()` だけを持つ）。"""
+    def __init__(self, *codes):
+        self._codes = set(codes)
+
+    def contains(self, label):
+        return label in self._codes
+
+
+def test_candidate_column_def_when_in_master_index():
+    """機器符号一覧に含まれるラベルは DEF、含まれない候補は CAN（通常・領域別の両方）。"""
+    idx = _StubMasterIndex('CB001')
+    df = compare_labels({'CB001': 1, 'CB002': 1}, {}, master_index=idx)
+    assert _row(df, 'CB001')['機器符号候補'] == 'DEF'
+    assert _row(df, 'CB002')['機器符号候補'] == 'CAN'
+    by_region, _metrics = compare_labels_by_region({'R': {'CB001': 1}}, {}, ['R'], master_index=idx)
+    assert by_region.iloc[0]['機器符号候補'] == 'DEF'
 
 
 @pytest.mark.parametrize('label, expected', [
@@ -121,3 +143,13 @@ def test_blank_repeated_column():
 def test_row_style(kubun, a, b, expected):
     """区分・個数一致による表示スタイル（薄いピンク/薄い青/薄い黄/薄い緑）。"""
     assert row_style(kubun, a, b) == expected
+
+
+def test_build_region_summary_rows_overall_block_comes_first():
+    """『全体（除外後）』ブロックは領域ごとのブロックの前に置かれ、先頭行だけ名称が入る。"""
+    overall = {'A ユニークラベル数': 3, 'B ユニークラベル数': 2, 'A のみ': 1, 'B のみ': 0, '両方': 2}
+    region = {'A ユニークラベル数': 1, 'B ユニークラベル数': 1, 'A のみ': 0, 'B のみ': 0, '両方': 1}
+    rows = build_region_summary_rows({'R2': region}, {'除外した領域': 'なし'}, overall_metrics=overall)
+    assert rows[0] == {'領域名': '', '項目': '除外した領域', '値': 'なし'}
+    assert [r['領域名'] for r in rows[1:]] == ['全体（除外後）', '', '', '', '', 'R2', '', '', '', '']
+    assert rows[1]['値'] == 3
