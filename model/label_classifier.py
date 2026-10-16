@@ -345,6 +345,19 @@ OTHER_PATTERNS = (
     re.compile(r'^AWG[0-9]+$'),
 )
 
+# 機器符号の形・追加機器符号（`CN.*`・`LS.*`・`DCPS.*` 等）に一致しても、機器符号候補にせず
+# 領域名候補にするパターン（2026-10-16 ユーザー指定。`OTHER_PATTERNS` の後に判定するため
+# `R10`・`AWG12` 等は OTHER のまま）。戻すときはこのタプルを空にする。
+#   - `CN` で始まりハイフンを含む（例 `CN-IF2-1`・`CN-IF3-1A`。コネクタ基板名として
+#     領域名に使われる）
+#   - 英大文字1字以上+数字ちょうど2桁（例 `THM01`・`SX01`・`LED16`・`CNE06`・`A10`）
+#   - `A`+数字1桁（例 `A1`）
+FORCED_REGION_NAME_PATTERNS = (
+    re.compile(r'^CN.*-.*$'),
+    re.compile(r'^[A-Z]+[0-9]{2}$'),
+    re.compile(r'^A[0-9]$'),
+)
+
 # 上の形に一致しても、追加機器符号（`CN.*`・`DIO.*`・`CIR.*`・`MC.*` 等。コネクタ・端子台など）に
 # 一致するものは機器符号のまま残す。ただし、この形そのものを定義している追加パターン
 # （`Dnnnan`・`DCnnan`。例 `DC19A4`）は対象外（領域名候補にしたいという指定のため）。
@@ -366,10 +379,12 @@ def classify_label(text: str) -> str:
     （最初に当たったもので決まる）:
       1. 空・英大文字1字・末尾が `+`/`-` → `OTHER`
       1a. `OTHER_PATTERNS`（A・C・L・Q・U・F 以外の英大文字1字+数字1〜2桁。例 `R10`・`N24`、および `AWG`+数字）→ `OTHER`
-      1b. `NON_DESIGNATOR_PATTERNS`（英字+数字+英字+数字 の形。例 `DC19A4`）→ `REGION_NAME`
+      1b. `FORCED_REGION_NAME_PATTERNS`（`CN`+ハイフンを含む・英字+数字2桁・`A`+数字1桁。
+          例 `CN-IF2-1`・`THM01`・`CNE06`・`A1`）→ `REGION_NAME`（追加機器符号に一致しても）
+      1c. `NON_DESIGNATOR_PATTERNS`（英字+数字+英字+数字 の形。例 `DC19A4`）→ `REGION_NAME`
           （ただし `CN.*`・`DIO.*` 等の追加機器符号に一致するものは機器符号のまま）
       2. 英字のみ以外の候補パターン（`PATTERN_CATEGORIES`）に一致 → `DESIGNATOR`
-         例 `CP004`・`SX01`・`THM01`・`R10`・`CN-IF2-1`・`RACK1`、`CP004 (10A)`
+         例 `CP004`・`SX001`・`CNPG1`・`RACK1`、`CP004 (10A)`
       3. 英字のみのとき:
          - 除外語（`EXCLUSION_EXACT_CATEGORIES`）のうち `unit_names` → `REGION_NAME`（例 `CTC`）
          - それ以外の除外語・除外パターン → `OTHER`（例 `GND`・`MOTOR`・`SYSTEM`・`XPID`）
@@ -383,6 +398,8 @@ def classify_label(text: str) -> str:
         return OTHER
     if any(rx.match(judgment) for rx in OTHER_PATTERNS):
         return OTHER
+    if any(rx.match(judgment) for rx in FORCED_REGION_NAME_PATTERNS):
+        return REGION_NAME
     if _is_non_designator_shape(judgment):
         return REGION_NAME
     if _NON_LETTERS_CANDIDATE.match(judgment):
