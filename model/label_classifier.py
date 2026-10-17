@@ -265,6 +265,13 @@ def normalize_label(label: str) -> str:
     return unicodedata.normalize('NFKC', label).strip()
 
 
+# 「符号(別称)番号」形（例 `ELB(CB)001`）の別称部分。先頭の英大文字+括弧内の英大文字+（空白可）+数字で
+# 始まるものだけが対象（2026-10-17 ユーザー決定）。機器符号一覧側 `designator_master.master_code_key()` が
+# `ELB(CB)001`→`ELB001` とするのと同じ考え方で、ラベル側も `ELB001` として判定・照合する。
+# `R10(2.2K)`・`GND(M4)`・`FB(WH)` のように後ろが数字で始まらないものは対象外。
+_ALIAS_INFIX_RE = re.compile(r'^([A-Z]+)\([A-Z]+\)\s*(?=[0-9])')
+
+
 def _judgment_text(normalized_label: str) -> str:
     """判定用文字列を返す（括弧・` **`〈半角スペース+アスタリスク2個〉・
     「単位記号Ωを含む語の直前の空白」のうち最も左にある位置以降と、その
@@ -289,7 +296,12 @@ def _judgment_text(normalized_label: str) -> str:
     `Q10 (Q2)`・`TMP (TMP-1003LM)` 等）。デリミタの有無に関わらず
     `.rstrip()` するため、デリミタが無い場合（呼び出し側が既に
     `normalize_label()` で前後空白除去済みの文字列を渡す想定）は実質的に
-    何もしない安全な操作である。"""
+    何もしない安全な操作である。
+
+    **別称除去（2026-10-17）**: 先頭が `ELB(CB)001` のような「符号(別称)番号」形のときは、
+    先に別称 `(CB)`（と直後の空白）を取り除いてからデリミタを探す（`ELB(CB)001` → `ELB001`、
+    `ELB(CB)001 (5A)` → `ELB001`）。"""
+    normalized_label = _ALIAS_INFIX_RE.sub(r'\1', normalized_label, count=1)
     idx_paren = normalized_label.find('(')
     idx_star = normalized_label.find(' **')
     idx_omega_char = normalized_label.find('Ω')
@@ -317,9 +329,10 @@ DESIGNATOR = 'designator'    # a: 機器符号候補（Excelの「機器符号�
 REGION_NAME = 'region_name'  # b: 領域名候補
 OTHER = 'other'              # c: どちらでもない
 
-# 日本語（ひらがな・カタカナ・漢字。半角カナは NFKC で全角になる）。括弧より前の判定用文字列に
-# これを含むラベルは注記文であって機器符号でも領域名でもない（2026-10-17 ユーザー指定。実例
-# `TB取付板`・`SENSOR ユニット`）。括弧内の日本語（`CP004 (日本語)`）は判定に使わない。
+# 日本語（ひらがな・カタカナ・漢字。半角カナは NFKC で全角になる）。ラベル全体（括弧内を含む）に
+# これを含むものは注記文であって機器符号でも領域名でもない（2026-10-17 ユーザー指定。実例
+# `TB取付板`・`SENSOR ユニット`・`CP004 (日本語)`）。同日の最初の指定は「括弧内の日本語は
+# 判定に使わない」だったが、同日中に「括弧内でも OTHER」へ変更された。
 _JAPANESE = re.compile('[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF]')
 
 _LETTERS_ONLY = re.compile(r'^[A-Z]+$')
@@ -389,7 +402,7 @@ def classify_label(text: str) -> str:
     判定用文字列は `_judgment_text()`（括弧・` **`・Ω語より前）で、判定順は次のとおり
     （最初に当たったもので決まる）:
       1. 空・英大文字1字・末尾が `+`/`-` → `OTHER`
-      1-00. 括弧より前にひらがな・カタカナ・漢字を含む → `OTHER`（例 `TB取付板`・`SENSOR ユニット`）
+      1-00. ひらがな・カタカナ・漢字を含む（括弧内も含む）→ `OTHER`（例 `TB取付板`・`SENSOR ユニット`・`CP004 (日本語)`）
       1-0. `TB` で始まる → `DESIGNATOR`（例 `TB01`・`TB-1`・`TB 1`。1 の末尾 `+`/`-` は除く）
       1a. `OTHER_PATTERNS`（A・C・L・Q・U・F 以外の英大文字1字+数字1〜2桁。例 `R10`・`N24`、および `AWG`+数字）→ `OTHER`
       1b. `FORCED_REGION_NAME_PATTERNS`（`CN`+ハイフンを含む・英字+数字2桁・`A`+数字1桁。
@@ -406,10 +419,11 @@ def classify_label(text: str) -> str:
          - それ以外 → `REGION_NAME`（例 `MFFX`・`FB`）
       4. 上記以外（複数語・記号入りなど）→ `REGION_NAME`（例 `SYSTEM I/F BOX`）
     """
-    judgment = _judgment_text(normalize_label(text))
+    normalized = normalize_label(text)
+    judgment = _judgment_text(normalized)
     if not judgment or _SINGLE_LETTER.match(judgment) or _TRAILING_SIGN.match(judgment):
         return OTHER
-    if _JAPANESE.search(judgment):
+    if _JAPANESE.search(normalized):
         return OTHER
     if judgment.startswith(TB_PREFIX):
         return DESIGNATOR
