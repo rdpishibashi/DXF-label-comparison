@@ -164,7 +164,12 @@ _TITLE_BLOCK_TERMS_NORM = {normalize_width(t).upper() for t in _TITLE_BLOCK_TERM
 _INFO_FRAME_MIN_MATCH = 3    # タイトル項目名の最小一致数（未満は情報枠なしとみなす）
 _INFO_FRAME_Y_GAP = 20.0     # ラベルのyクラスタリング許容ギャップ
 _INFO_FRAME_X_GAP = 30.0     # ラベルのxクラスタリング許容ギャップ（横並び複数枠対策）
-_INFO_FRAME_SNAP = 2.0       # 境界線の座標マージン
+_INFO_FRAME_SNAP = 2.0       # 境界線の座標マージン（固定サイズ化後は旧テンプレート判定の許容にだけ使う）
+# 図面情報枠は用紙サイズによらず図面枠の右下に固定サイズで置かれる（2026-10-17 ユーザー確認。
+# A3 では左辺が枠記号「5」の中央、上辺が「E」の中央。実データ144ファイルで確認）。
+# 新テンプレート 幅175×高さ64、旧テンプレート 幅350×高さ72（項目名が右175より左にもある）。
+_INFO_FRAME_SIZE_NEW = (175.0, 64.0)
+_INFO_FRAME_SIZE_OLD = (350.0, 72.0)
 
 
 def _detect_info_frame_bbox(block_lines, label_points, xl, xr, y0, y1):
@@ -184,9 +189,10 @@ def _detect_info_frame_bbox(block_lines, label_points, xl, xr, y0, y1):
          図面〈旧版タイトルブロックとの比較表示等〉で、右側の枠だけを
          採用するため）。
       4. 一致数が `_INFO_FRAME_MIN_MATCH` 未満ならNone（情報枠なしとみなす）。
-      5. クラスタのbboxを囲む実際の境界線（右辺xrに接する水平線・底辺y0に
-         接する垂直線）を `block_lines` から探し、それを情報枠の境界とする。
-         境界線が見つからない場合はラベルbbox+マージンでフォールバックする。
+      5. 位置・大きさは図面枠の右下に固定サイズで決める（新テンプレート 175×64、
+         3の右辺に連なる項目名が右175より左にも及べば旧テンプレート 350×72。
+         `_INFO_FRAME_SIZE_*`）。
+         `block_lines` は呼び出し互換のため受け取るが使わない。
 
     戻り値: (left, xr, y0, top) または None（情報枠が検出できない場合）
     """
@@ -220,40 +226,17 @@ def _detect_info_frame_bbox(block_lines, label_points, xl, xr, y0, y1):
     if len(xcluster) < _INFO_FRAME_MIN_MATCH:
         return None
 
-    xs = [x for (_t, x, _y) in xcluster]
-    ys = [y for (_t, _x, y) in xcluster]
-    bbox_left, bbox_top = min(xs), max(ys)
-
-    h_candidates = []  # (y, left_x)
-    v_candidates = []  # (x, top_y)
-    for (s, e) in block_lines:
-        sx, sy = s[0], s[1]
-        ex, ey = e[0], e[1]
-        if abs(sy - ey) < 0.01:
-            y = (sy + ey) / 2
-            if y0 - 1 <= y <= y1 + 1:
-                x_min, x_max = min(sx, ex), max(sx, ex)
-                if abs(x_max - xr) <= _INFO_FRAME_SNAP:
-                    h_candidates.append((y, x_min))
-        elif abs(sx - ex) < 0.01:
-            x = (sx + ex) / 2
-            if xl - 1 <= x <= xr + 1:
-                y_min, y_max = min(sy, ey), max(sy, ey)
-                if abs(y_min - y0) <= _INFO_FRAME_SNAP:
-                    v_candidates.append((x, y_max))
-
-    h_above = [h for h in h_candidates if h[0] >= bbox_top - _INFO_FRAME_SNAP]
-    v_left = [v for v in v_candidates if v[0] <= bbox_left + _INFO_FRAME_SNAP]
-
-    if h_above and v_left:
-        top_y = min(h_above, key=lambda h: h[0])[0]
-        left_x = max(v_left, key=lambda v: v[0])[0]
-    else:
-        margin = _INFO_FRAME_SNAP
-        top_y = bbox_top + margin
-        left_x = bbox_left - margin
-
-    return (left_x, xr, y0, top_y)
+    # 位置は図面枠の右下に固定サイズで決める（境界線探索は、部品の線や内部の仕切りを拾って
+    # 左端が図面枠の左辺・上端が内部線になる誤判定を起こしていた。`EE3273-039-06B.dxf` 等）。
+    # 右辺に連なる項目名のクラスタ（`xcluster`。横並びの別タイトルブロックは含まない）が
+    # 新テンプレートの幅より左にも及べば旧テンプレート（幅350）。
+    new_w, new_h = _INFO_FRAME_SIZE_NEW
+    old_w, old_h = _INFO_FRAME_SIZE_OLD
+    is_old = any(x < xr - new_w - _INFO_FRAME_SNAP and y <= y0 + old_h + _INFO_FRAME_SNAP
+                 for (_t, x, y) in xcluster)
+    width, height = (old_w, old_h) if is_old else (new_w, new_h)
+    width = min(width, xr - xl)
+    return (xr - width, xr, y0, y0 + height)
 
 
 def collect_in_frame_labels(
@@ -680,6 +663,66 @@ def unnamed_region_labels(analysis: dict) -> Dict[int, str]:
     }
 
 
+# 複数の領域名を「どれか」の意味で連結するときの区切り（2026-10-17 ユーザー指定）。
+# カンマは AND（すべて）と読まれやすいため、OR は ` | ` にする。`/` は領域名の中に現れる
+# （`SYSTEM I/F BOX`）ので使わない。カンマは従来どおり AND・列挙（ラベルの `領域` 列、
+# 図番リスト等）に使う。
+OR_DELIMITER = ' | '
+
+
+def adopted_region_names(name_selections_by_file):
+    """`name_selections_by_file` で採用された領域名（NFKC正規化済み）の集合
+    （`['']` の「採用しない」印は除く）。"""
+    return {
+        normalize_width(n)
+        for sel in name_selections_by_file.values()
+        for names in sel.values() for n in names if n
+    }
+
+
+def add_minor_region_selections(analyses, name_selections_by_file, target_names,
+                                excluded_names=frozenset()):
+    """面積条件に満たない小領域（`analysis['minor_regions']`）のうち、`target_names`
+    （全ファイルを通じて採用対象とする領域名。呼び出し側が決める）と一致する候補を持つものを
+    採用する（2026-10-17 ユーザー指定）。`name_selections_by_file` に追加したコピーを返す
+    （引数は変更しない）。
+
+    小領域ごとの判定:
+      - 候補のどれかが「除外」指定（`excluded_names`、NFKC正規化済み）されていれば採用しない
+        （除外は通常領域だけに効く仕様だが、除外名称の小領域を「特定」で拾い直すことはしない）
+      - 候補（並び順）のうち `target_names` に含まれ、かつ同じファイルの同じ図面枠で通常領域に
+        既に採用されていない名称を集める（名称単位。入れ子ならラベルは既に同名の領域に入って
+        おり、同枠内で重複させない）
+      - 1つも残らなければ採用しない。2つ以上残れば `OR_DELIMITER` で連結した名前で採用する
+        （どれか1つに一義的に決められないため。例 `CN-IF2-1 | DCPS01`）
+    同じ図面枠に同名の小領域が複数あれば、すべて同じ名称で採用する。
+    `minor_regions` を持たない解析結果（他プロジェクト・領域検出OFF）は何も追加されない。
+    """
+    excluded = {normalize_width(n) for n in excluded_names}
+    target = {normalize_width(n) for n in target_names} - excluded
+    result = {fname: dict(sel) for fname, sel in name_selections_by_file.items()}
+    if not target:
+        return result
+    for fname, analysis in analyses.items():
+        if fname not in result:
+            continue
+        sel = result[fname]
+        frame_of = {r['id']: r['frame'] for r in analysis.get('regions', [])}
+        taken = {
+            (frame_of.get(rid), normalize_width(n))
+            for (_f, rid), names in sel.items() for n in names if n
+        }
+        for reg in analysis.get('minor_regions', []):
+            texts = list(dict.fromkeys(
+                normalize_width(t) for _d, t in reg.get('name_candidates', [])))
+            if any(t in excluded for t in texts):
+                continue
+            matched = [t for t in texts if t in target and (reg['frame'], t) not in taken]
+            if matched:
+                sel[(fname, reg['id'])] = [OR_DELIMITER.join(matched)]
+    return result
+
+
 def build_named_regions(
     analysis: dict,
     name_selections: dict,
@@ -699,7 +742,9 @@ def build_named_regions(
     戻り値: (named, next_no_name_idx)
     """
     named = []
-    regions = analysis.get('regions', [])
+    # 小領域（`minor_regions`）は選択（`add_minor_region_selections()`）がある場合だけ
+    # 対象になる。選択が無ければ何もしない（no name にもしない）。
+    regions = list(analysis.get('regions', [])) + list(analysis.get('minor_regions', []))
     # 無名領域の出力名は `unnamed_output_names()`（「領域一覧」の表示名と同じ規則）。
     # 「特定」OFFの無名領域がある場合も、番号は一覧の表示名と食い違わない。
     no_name_by_id = unnamed_output_names(analysis)
@@ -873,8 +918,8 @@ def build_all_regions_summary(
 
     領域名:
       - 確定済み（`name_selections` に選択あり）: その名前
-      - 候補はあるが未確定: 候補をカンマ区切りで列挙（採否に関わらず全候補、
-        Tier→距離順）
+      - 候補はあるが未確定: 候補を ` | `（`OR_DELIMITER`。どれか1つの意味）で列挙
+        （採否に関わらず全候補、Tier→距離順）
       - 候補なし: "no name"（`build_named_regions()` と同じ番号付け規則。
         この場合は自動確定として扱う）
 
@@ -899,7 +944,10 @@ def build_all_regions_summary(
         list[dict]: [{'id', 'frame', 'name', 'area_pct', 'label_count',
                        'ref_designator_count', 'mark'}, ...]（regions の順）
     """
-    regions = analysis.get('regions', [])
+    # 採用された小領域（`add_minor_region_selections()`）も行を出す。不採用の小領域は
+    # 載せない（「領域一覧」シートが小さな枠で溢れるため）。
+    regions = list(analysis.get('regions', [])) + [
+        r for r in analysis.get('minor_regions', []) if name_selections.get((fname, r['id']))]
 
     # 'name' キーは assign_region_labels() 内で `if nm and ...` と真偽値判定
     # されるため、reg['id'] をそのまま使うと id=0 の領域が偽値扱いで無視されて
@@ -928,7 +976,7 @@ def build_all_regions_summary(
         if chosen:
             name = ', '.join(dict.fromkeys(chosen))
         elif candidates:
-            name = ', '.join(candidates)
+            name = OR_DELIMITER.join(candidates)
         else:
             name = no_name_by_id[reg['id']]
         pseudo = _pseudo_name(reg['id'])
@@ -1001,7 +1049,9 @@ def build_ref_designator_region_results(
             'rows': out['rows'],
             'named': out['named'],
             'frames': len(analysis.get('frames', [])),
-            'regions_detected': len(analysis.get('regions', [])),
+            'regions_detected': len(analysis.get('regions', [])) + sum(
+                1 for r in analysis.get('minor_regions', [])
+                if name_selections_by_file[fname].get((fname, r['id']))),
             'regions_named': len({r['id'] for r in named}),
             'total_in_frame': len(kept_labels),
             'ref_designator_count': ref_designator_count,

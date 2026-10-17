@@ -482,6 +482,74 @@ def _merge_collinear(items, level_tol, bridge=True, circles=None, circle_band=2.
     return out
 
 
+def _raw_axis_segments(lines, frame, margin, axis_tol=0.05, min_len=0.3):
+    """図面枠内の軸平行線分を、長さを問わず `(raw_H[(y,x0,x1)], raw_V[(x,y0,y1)])` で返す
+    （対辺補完で「角から線が出ているか」の証拠にだけ使う。`_split_axis_aligned()` は長さ
+    snap 未満の短片を捨てるが、その短片が途切れた辺の端を示していることがある）。"""
+    xl, xr, y0, y1 = frame
+    raw_h, raw_v = [], []
+    for it in lines:
+        (x1, ya), (x2, yb) = (it[0][0], it[0][1]), (it[1][0], it[1][1])
+        if not (xl - margin <= min(x1, x2) and max(x1, x2) <= xr + margin
+                and y0 - margin <= min(ya, yb) and max(ya, yb) <= y1 + margin):
+            continue
+        if abs(x1 - x2) <= axis_tol and abs(ya - yb) > min_len:
+            raw_v.append(((x1 + x2) / 2.0, min(ya, yb), max(ya, yb)))
+        elif abs(ya - yb) <= axis_tol and abs(x1 - x2) > min_len:
+            raw_h.append(((ya + yb) / 2.0, min(x1, x2), max(x1, x2)))
+    return raw_h, raw_v
+
+
+def _complete_rectangles(Hm, Vm, raw_h, raw_v, circles=(), band=0.05, tol=0.5):
+    """四角形の欠けた1辺を、対辺から補完した `(Hm', Vm')` を返す。
+
+    同じ範囲（端点差 ≤tol）の平行スパン2本があり、直交する一方の辺がその区間を完全に覆い、
+    もう一方の辺が覆われておらず、**その辺の両方の角から線が出ている**（`Vm`/`Hm` と生線分
+    `raw_v`/`raw_h` を証拠にする）ときだけ、その辺を補う。補完区間上に接続点（円。`circles`・
+    許容 `band`）があれば補わない。ギャップ橋渡し（`_merge_collinear`）が届かない、短片を
+    含む途切れ方（`EE3273-039-06B.dxf` の `SENSOR I/F B.D-Ⅲ`）用。通常の領域検出には使わず、
+    `analyze_dxf_regions()` の名称採用候補（`minor_regions`）を作る追加パスだけが使う。
+    """
+    def covered(spans, level, lo, hi):
+        return any(abs(lv - level) <= tol and a <= lo + tol and b >= hi - tol for (lv, a, b) in spans)
+
+    def attached_both(spans, level, lo, hi):
+        at_lo = any(abs(lv - level) <= tol and abs(a - lo) <= tol and b < hi - tol for (lv, a, b) in spans)
+        at_hi = any(abs(lv - level) <= tol and abs(b - hi) <= tol and a > lo + tol for (lv, a, b) in spans)
+        return at_lo and at_hi
+
+    def circle_on(level, lo, hi, swapped):
+        for c in circles:
+            cx, cy = (c[1], c[0]) if swapped else c
+            if abs(cx - level) <= band and lo - band <= cy <= hi + band:
+                return True
+        return False
+
+    def fill(par, perp, raw_perp, swapped):
+        added = []
+        by_extent = {}
+        for (lv, a, b) in par:
+            by_extent.setdefault((round(a), round(b)), []).append((lv, a, b))
+        for group in by_extent.values():
+            group = sorted(group)
+            for i in range(len(group)):
+                for j in range(i + 1, len(group)):
+                    l1, a1, b1 = group[i]
+                    l2, a2, b2 = group[j]
+                    if abs(a1 - a2) > tol or abs(b1 - b2) > tol or l2 - l1 <= tol:
+                        continue
+                    for side, other in ((a1, b1), (b1, a1)):
+                        if (covered(perp, other, l1, l2) and not covered(perp, side, l1, l2)
+                                and attached_both(perp + raw_perp, side, l1, l2)
+                                and not circle_on(side, l1, l2, swapped)):
+                            added.append((side, l1, l2))
+        return added
+
+    add_v = fill(Hm, Vm, raw_v, False)
+    add_h = fill(Vm, Hm, raw_h, True)
+    return Hm + add_h, Vm + add_v
+
+
 # ============================================================
 # 5. 図面枠検出
 # ============================================================
@@ -938,6 +1006,10 @@ def _detect_regions(RH, RV, frame, frame_area, cfg, circles=None, raw_lines=None
     Vm = _merge_collinear(Vf, mtol, bridge=bridge_v, circles=fcircles, circle_band=cband,
                           h_endpoints=h_endpoints, corner_tol=ctol,
                           span_levels=span_levels)
+    if cfg.get('complete_rectangles'):
+        # 対辺補完（名称採用候補を作る追加パス専用。`_complete_rectangles()` 参照）。
+        raw_h, raw_v = _raw_axis_segments(raw_lines or [], frame, m)
+        Hm, Vm = _complete_rectangles(Hm, Vm, raw_h, raw_v, circles=fcircles, band=cband)
     # 端点接続ベースの面探索（中ほど交差では繋がない）ため、部品矩形の縦線は領域辺の
     # 途中を横切るだけで接続せず、回り込みは発生しない。
     faces, dangling = _find_rectilinear_faces(Hm, Vm, fsnap)
@@ -1002,7 +1074,7 @@ def _count_letters(s):
     return sum(1 for ch in s if _is_letter(ch))
 
 
-_HIRAGANA_KANJI = re.compile('[\u3040-\u309F\u3400-\u4DBF\u4E00-\u9FFF]')
+_HIRAGANA_KANJI = re.compile('[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF]')   # 名前は旧称。カタカナも含む（2026-10-17）
 
 
 def _is_valid_name_candidate(t, min_letters, exclude_lowercase, exclude_terms,
@@ -2007,12 +2079,20 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
           だけ使われている長い線の余剰部分）で構成される場合は `entities` に
           複数件入る。取り付け点がどの領域の境界にも乗らない枝（無関係な部品等）
           は報告されない。
+      minor_regions: `cfg['detect_minor_regions']` が真のときだけ埋まる、名称で採用される
+        候補領域（面積条件 area_ratio に満たない小領域、および途切れた辺を対辺から補完すると
+        閉じる四角形〈`_complete_rectangles()`〉。名称付きのみ。`regions` と同じキー構成。id は `regions`
+        の最大id+1 からの連番で、`regions` とは決して重ならない）。`regions` の検出結果には
+        一切影響しない。採否は呼び出し側が決める（DXF-extract-labels は
+        `ref_designator.add_minor_region_selections()` で、他の図面・領域で採用された
+        名称と一致するものだけを採用する）。
       error: str | None
     """
     cfg = dict(DEFAULT_REGION_CONFIG)
     if config:
         cfg.update(config)
-    result = {'frames': [], 'frame_area': 0.0, 'labels': [], 'regions': [], 'error': None}
+    result = {'frames': [], 'frame_area': 0.0, 'labels': [], 'regions': [],
+              'minor_regions': [], 'error': None}
     try:
         doc = ezdxf.readfile(dxf_file)
         msp = doc.modelspace()
@@ -2319,6 +2399,16 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
             if rescued:
                 _remove_overlap_claimed_candidates(regions)
         result['regions'] = regions
+        if cfg.get('detect_minor_regions'):
+            # 対辺補完で閉じる領域（途切れた辺を補えば閉じる四角形）も名称採用の候補に加える
+            # （通常の `regions` は補完しない。`_complete_rectangles()` 参照）。
+            comp_cands, _ = _run_region_detection(
+                lines_for_detection, {**det_cfg, 'complete_rectangles': True}, frames,
+                frame_area, frame_labels, connection_points, rotated_edge_roles)
+            minor_cands = [_merge_cands_lists(frame_cands[fi], comp_cands[fi])
+                           for fi in range(len(frame_cands))]
+            result['minor_regions'] = _detect_minor_regions(
+                minor_cands, regions, frame_area, frame_labels, cfg, area_ratio)
 
         del doc, msp
         gc.collect()
@@ -2326,6 +2416,55 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
         result['error'] = str(e)
         gc.collect()
     return result
+
+
+def _polygon_bbox_key(polygon):
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    return (round(min(xs)), round(max(xs)), round(min(ys)), round(max(ys)))
+
+
+def _detect_minor_regions(frame_cands, regions, frame_area, frame_labels, cfg, area_ratio):
+    """名称で採用される候補領域を返す（`analyze_dxf_regions()` の `minor_regions`）。
+
+    `frame_cands` は図面枠ごとの全候補（面積条件の採否を問わない。対辺補完で閉じた候補
+    〈`_complete_rectangles()`〉を含む）。これを `regions` と同じ後処理（補完面・合体親・
+    図面枠またぎの頻度順位・重なり判定）にかけ直し、`regions` に無い（bboxで判定）
+    名称付き領域だけを取り出す（面積条件未満の小領域、および補完で初めて閉じた領域）。
+    重なり判定は小領域も含めて行わないと、
+    大きい領域が小領域の名称を抱え込んだままになる（`EE6892-039-03A.dxf` の
+    `CN-IF2-1`）。`regions` 自体は別に計算済みで、この関数は変更しない。
+    """
+    all_regions = []
+    rid = 0
+    for fi, cands_list in enumerate(frame_cands):
+        for cf in cands_list:
+            all_regions.append({
+                'id': rid, 'frame': fi, 'polygon': cf['polygon'],
+                'corners': _polygon_corners(cf['polygon']),
+                'area': cf['area'], 'area_pct': 100.0 * cf['area'] / frame_area,
+                'name_candidates': list(cf['name_candidates']),
+                'default_name': cf['default_name'],
+                'default_name_tier': cf.get('default_name_tier'),
+                'dangling_edges': [],
+                '_tier_by_text': dict(cf.get('tier_by_text', {})),
+            })
+            rid += 1
+    all_regions = _resolve_complement_faces(all_regions, frame_area, next_id=rid)
+    all_regions = _resolve_union_parents(all_regions, labels=frame_labels, cfg=cfg)
+    _apply_cross_frame_frequency_ranking(all_regions)
+    _remove_overlap_claimed_candidates(all_regions)
+
+    adopted_keys = {_polygon_bbox_key(r['polygon']) for r in regions}
+    next_id = max((r['id'] for r in regions), default=-1) + 1
+    minors = []
+    for r in all_regions:
+        if not r['name_candidates'] or _polygon_bbox_key(r['polygon']) in adopted_keys:
+            continue
+        r['id'] = next_id
+        next_id += 1
+        minors.append(r)
+    return minors
 
 
 def assign_region_labels(
