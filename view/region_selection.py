@@ -37,6 +37,9 @@ from model.region_detector import (
 from model.extraction_pipeline import detect_file_regions, extract_file_data
 from model.ref_designator import unnamed_region_labels
 
+# 「領域一覧」セクションの見出し（2026-10-17 ユーザー指定で改称。コード中の「領域一覧」は同じ
+# セクションを指す。Excel のシート名 `領域一覧` は別物で変えない）
+SECTION_TITLE = '抽出領域の選択'
 ANALYSES_KEY = 'region_analyses'
 CONFIRMED_KEY = 'region_selection_confirmed'
 SELECTION_KEY_PREFIXES = ('rc_', 'grc_', 'gre_')
@@ -178,6 +181,55 @@ def _region_excluded(reg, excluded_names, unnamed_label=None):
     )
 
 
+def resolve_by_other_frames(reg, analysis, checked_names, excluded_names):
+    """要選択の領域 `reg` を、同じファイルの**別の図面枠**で自動決定済みの名称で決める
+    （2026-10-17 ユーザー指定）。
+
+    `reg` の「領域一覧」チェック済み候補のうち、別の図面枠の領域が
+    `resolve_globally_decided_name()` で決定した名称（NFKC正規化して比較。「除外」指定の
+    領域は根拠にしない）と一致するものが**ちょうど1種類**ならその候補テキストを返す。
+    0種類・2種類以上なら None（従来どおり「領域の確認」で選ばせる）。同じ図面枠内の
+    別領域で決まった名称は根拠にしない（同一図面内の入れ子・隣接領域は別の物理領域のため）。
+    """
+    decided = set()
+    for r2 in analysis.get('regions', []):
+        if r2.get('frame') == reg.get('frame') or _region_excluded(r2, excluded_names):
+            continue
+        name = resolve_globally_decided_name(r2, checked_names)
+        if name is not None:
+            decided.add(normalize_width(name))
+    matches = {}
+    for _d, t in pending_candidates_for_region(reg, checked_names):
+        if normalize_width(t) in decided:
+            matches.setdefault(normalize_width(t), t)
+    return next(iter(matches.values())) if len(matches) == 1 else None
+
+
+def unconditional_region_names(analyses):
+    """「領域の確認」を経ずに決まる領域名（NFKC正規化済みの集合。2026-10-17 ユーザー指定）。
+
+    各ファイルの通常領域のうち「除外」指定でないものについて、
+      (a) 「領域一覧」のチェックで候補がちょうど1件に決まる名称（`resolve_globally_decided_name()`）
+      (b) 要選択（チェック済み候補が2件以上）だが同じファイルの別の図面枠で決まった名称で
+          決まるもの（`resolve_by_other_frames()`）
+    の名称を集める。「領域の確認」で手動選択した名称は含まれない。5%未満の小領域の採用対象
+    （`ref_designator.add_minor_region_selections()` の `target_names`）に使う。
+    """
+    checked_names = global_checked_region_names()
+    excluded_names = global_excluded_region_names()
+    names = set()
+    for analysis in analyses.values():
+        for reg in analysis.get('regions', []):
+            if _region_excluded(reg, excluded_names):
+                continue
+            name = resolve_globally_decided_name(reg, checked_names)
+            if name is None and is_region_pending_selection(reg, checked_names):
+                name = resolve_by_other_frames(reg, analysis, checked_names, excluded_names)
+            if name is not None:
+                names.add(normalize_width(name))
+    return names
+
+
 def gather_name_selections(fname, analysis):
     """この図面の領域名選択を集める。「領域一覧」でのグローバル決定（優先）と、
     「領域の確認」での個別選択（チェック済み候補が2件以上ある領域のみ）を統合する。
@@ -215,6 +267,10 @@ def gather_name_selections(fname, analysis):
             name_selections[(fname, reg['id'])] = [decided]
             continue
         if not is_region_pending_selection(reg, checked_names):
+            continue
+        by_other = resolve_by_other_frames(reg, analysis, checked_names, excluded_names)
+        if by_other is not None:
+            name_selections[(fname, reg['id'])] = [by_other]
             continue
         pending_cands = pending_candidates_for_region(reg, checked_names)
         chosen = []
@@ -471,8 +527,26 @@ def region_list_editor_state(prev, candidate_names, current):
     return prev
 
 
+def region_list_dataframe(candidate_names, values, allow_exclude):
+    """「抽出領域の選択」表の元データ。`values` は {名称: (特定, 除外)}。
+
+    通常は `region_list_editor_state()` の `base`（表を作り直さないための固定値）を渡し、
+    ロック中（結果表示中）は現在の選択状態 `current` を渡す。ロックで `disabled` が変わると
+    ウィジェットのIDが変わって編集内容（ウィジェット側の状態）が失われ、`base` のままだと
+    チェックが全部外れて表示されてしまうため（2026-10-17）。"""
+    rows = []
+    for name in candidate_names:
+        spec, excl = values[name]
+        row = {'特定': spec}
+        if allow_exclude:
+            row['除外'] = excl
+        row['領域名'] = name
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def render_global_region_names_section(candidate_names, locked, action='抽出', allow_exclude=False,
-                                       default_on_names=()):
+                                       default_on_names=(), side_widget=None):
     """「領域一覧」セクション: `candidate_names`（呼び出し側が決める名称候補の
     一覧。表示順のまま使う）を表(st.data_editor)で表示し、領域名ごとに「特定」
     （`allow_exclude=True` のときはさらに「除外」）をON/OFFさせる
@@ -498,6 +572,9 @@ def render_global_region_names_section(candidate_names, locked, action='抽出',
     `default_on_names`: 「特定」の既定値をONにする名称（名称のない領域の表示名。従来から
     自動で採用していた領域の既定の出力を変えないため）。
 
+    `side_widget`（引数なしの呼び出し可能オブジェクト、既定 None）: 渡すと表の右側の列で呼び出す
+    （表と並べて置きたいオプションウィジェット用。2026-10-17）。None なら表だけを幅いっぱいに置く従来表示。
+
     `candidate_names` が空の場合は案内メッセージのみ表示する（面積条件〈config.py
     の area_ratio / group_area_ratio〉を満たす領域が1件も無かった、または
     呼び出し側の絞り込みで候補が残らなかったケース）。
@@ -506,7 +583,7 @@ def render_global_region_names_section(candidate_names, locked, action='抽出',
         st.info("一定面積の領域は検出されませんでした。")
         return
 
-    st.subheader("領域一覧")
+    st.subheader(SECTION_TITLE)
     if allow_exclude:
         st.caption(
             "検出された全ファイル・全領域の名称候補（複数候補を持つ領域も含む）を"
@@ -552,15 +629,7 @@ def render_global_region_names_section(candidate_names, locked, action='抽出',
         st.session_state.get(EDITOR_STATE_KEY), candidate_names, current)
     st.session_state[EDITOR_STATE_KEY] = state
 
-    rows = []
-    for name in candidate_names:
-        spec, excl = state['base'][name]
-        row = {'特定': spec}
-        if allow_exclude:
-            row['除外'] = excl
-        row['領域名'] = name
-        rows.append(row)
-    df = pd.DataFrame(rows)
+    df = region_list_dataframe(candidate_names, current if locked else state['base'], allow_exclude)
 
     column_config = {'特定': st.column_config.CheckboxColumn('特定', width=CHECK_COLUMN_WIDTH)}
     column_order = ['特定']
@@ -573,11 +642,21 @@ def render_global_region_names_section(candidate_names, locked, action='抽出',
     # （Streamlit仕様）。表自体の幅を列幅の合計に固定して指定どおりの幅にする。
     table_width = CHECK_COLUMN_WIDTH * (len(column_order) - 1) + NAME_COLUMN_WIDTH
 
-    edited = st.data_editor(
-        df, key=f"grc_editor_{state['ver']}", hide_index=True,
-        disabled=True if locked else ['領域名'],
-        column_config=column_config, column_order=column_order, width=table_width,
-    )
+    def _editor():
+        return st.data_editor(
+            df, key=f"grc_editor_{state['ver']}", hide_index=True,
+            disabled=True if locked else ['領域名'],
+            column_config=column_config, column_order=column_order, width=table_width,
+        )
+
+    if side_widget is None:
+        edited = _editor()
+    else:
+        col_table, col_side = st.columns([5, 4])
+        with col_table:
+            edited = _editor()
+        with col_side:
+            side_widget()
 
     edited_by_name = edited.set_index('領域名')
     new_values = {
@@ -618,7 +697,8 @@ def region_confirmation_targets(analyses, checked_names):
 
     図面枠が見つからない既知の未対応ケース（`FRAME_NOT_FOUND_ERROR_MARKER`）
     は対象から除く。「除外」指定された領域は要選択候補の数に関わらず対象から
-    除く（v3.11.0新設。§4決定2「除外領域は領域の確認に表示しない」）。
+    除く（v3.11.0新設。§4決定2「除外領域は領域の確認に表示しない」）。同じファイルの別の
+    図面枠で決まった名称で決められる領域も除く（`resolve_by_other_frames()`、2026-10-17）。
     戻り値はファイルキーでソートした `[(fname, analysis, pending_regions), ...]`。
     """
     excluded_names = global_excluded_region_names()
@@ -632,6 +712,7 @@ def region_confirmation_targets(analyses, checked_names):
             r for r in regions
             if is_region_pending_selection(r, checked_names)
             and not _region_excluded(r, excluded_names)
+            and resolve_by_other_frames(r, analysis, checked_names, excluded_names) is None
         ]
         if not err and not pending_regions:
             continue  # 個別選択が不要なファイルは表示しない
@@ -659,8 +740,9 @@ def render_region_confirmation_section(analyses, locked, action='抽出'):
 
     st.subheader("領域の確認")
     st.caption(
-        "「領域一覧」でチェックした領域の名称候補が2件以上ある（どれを採用する"
-        "か決めることができない）ファイルのみを表示しています。候補を1つも"
+        f"「{SECTION_TITLE}」でチェックした領域の名称候補が2件以上ある（どれを採用する"
+        "か決めることができない）ファイルのみを表示しています。同じファイルの別の図面で"
+        "特定できた名称がある領域は、その名称を自動で採用するため表示しません。候補を1つも"
         f"選択しなかった領域は{action}対象から除外され、ここには表示されません。"
     )
 

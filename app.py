@@ -1,6 +1,7 @@
 import os
 import time
 import traceback
+import unicodedata
 
 import streamlit as st
 import pandas as pd
@@ -168,7 +169,7 @@ def _render_intro():
             "（図番・タイトル・サブタイトル）が表示され、タイトルが「UNIT内結線図」の図面に"
             "チェックが付きます。チェックを付け外しして比較対象を手作業で変更できます",
             "3. 「指定領域で比較する」をONにした場合は、「領域を検出」ボタンで矩形領域を検出し、"
-            "「領域一覧」（A・Bに共通する領域名）で、比較したい領域名を「特定」にチェックし、"
+            "「抽出領域の選択」（A・Bに共通する領域名）で、比較したい領域名を「特定」にチェックし、"
             "比較から外したい領域（凡例・表など）を「除外」にチェックします。"
             "チェックで決定できなかった領域は「領域の確認」で個別に選択します",
             "4. 「展開図-結線図比較」ボタンで比較し、結果をExcelでダウンロードできます",
@@ -296,7 +297,7 @@ def _render_region_section(named_a, named_b, locked):
     戻り値: (region_mode, 比較ボタンを出してよいか)"""
     region_mode = st.checkbox(
         "指定領域で比較する", key='region_mode_enabled', disabled=locked,
-        help="ONにすると「領域を検出」ボタン・「領域一覧」「領域の確認」セクションが表示され、"
+        help="ONにすると「領域を検出」ボタン・「抽出領域の選択」「領域の確認」セクションが表示され、"
              "選択した領域名ごとにA・Bのラベルを比較します（図面全体の比較は行いません）。"
              "（検出パラメータは config.py の region_detection_config で設定します）",
     )
@@ -418,6 +419,14 @@ def _preview_sheets(diff_df, summary):
     return sheets
 
 
+def _sheet_select_width(names):
+    """シート選択 selectbox の幅 px（最長のシート名に合わせる。既定の全幅だと
+    長すぎてメニューと認識されない、2026-10-17 ユーザー指摘）。"""
+    longest = max((sum(2 if unicodedata.east_asian_width(c) in 'WFA' else 1 for c in str(n))
+                   for n in names), default=0)
+    return max(160, longest * 8 + 28 + 36)
+
+
 CANDIDATE_COLUMN = '機器符号候補'
 CANDIDATE_BLANK = '（空欄）'
 _CANDIDATE_ORDER = ('DEF', 'CAN')
@@ -467,7 +476,7 @@ def _render_preview(diff_df, summary):
                      expanded=st.session_state.get('cmp_preview_expanded', False)):
         names = [name for name, _df in sheets]
         selected = st.selectbox("シートを選択", names, key='cmp_preview_sheet',
-                                on_change=_mark_expanded)
+                                on_change=_mark_expanded, width=_sheet_select_width(names))
         df = dict(sheets)[selected]
         if df is None:
             rows = summary if isinstance(summary, list) else [

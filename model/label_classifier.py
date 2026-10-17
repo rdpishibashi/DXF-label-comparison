@@ -317,6 +317,11 @@ DESIGNATOR = 'designator'    # a: 機器符号候補（Excelの「機器符号�
 REGION_NAME = 'region_name'  # b: 領域名候補
 OTHER = 'other'              # c: どちらでもない
 
+# 日本語（ひらがな・カタカナ・漢字。半角カナは NFKC で全角になる）。括弧より前の判定用文字列に
+# これを含むラベルは注記文であって機器符号でも領域名でもない（2026-10-17 ユーザー指定。実例
+# `TB取付板`・`SENSOR ユニット`）。括弧内の日本語（`CP004 (日本語)`）は判定に使わない。
+_JAPANESE = re.compile('[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF]')
+
 _LETTERS_ONLY = re.compile(r'^[A-Z]+$')
 _SINGLE_LETTER = re.compile(r'^[A-Z]$')
 _TRAILING_SIGN = re.compile(r'.*[+-]$')
@@ -364,6 +369,12 @@ FORCED_REGION_NAME_PATTERNS = (
 _SHAPE_ADDED_SPECS = ('added_desig:Dnnnan', 'added_desig:DCnnan')
 
 
+# `TB` で始まるラベルはすべて機器符号候補にする（2026-10-17 ユーザー指定。端子台。
+# 末尾が `+`/`-` のもの〈TB1+・TB1-〉だけは従来どおり OTHER）。戻すときは空文字にせず
+# この判定ごと削除する。
+TB_PREFIX = 'TB'
+
+
 def _is_non_designator_shape(judgment: str) -> bool:
     if not any(rx.match(judgment) for rx in NON_DESIGNATOR_PATTERNS):
         return False
@@ -378,6 +389,8 @@ def classify_label(text: str) -> str:
     判定用文字列は `_judgment_text()`（括弧・` **`・Ω語より前）で、判定順は次のとおり
     （最初に当たったもので決まる）:
       1. 空・英大文字1字・末尾が `+`/`-` → `OTHER`
+      1-00. 括弧より前にひらがな・カタカナ・漢字を含む → `OTHER`（例 `TB取付板`・`SENSOR ユニット`）
+      1-0. `TB` で始まる → `DESIGNATOR`（例 `TB01`・`TB-1`・`TB 1`。1 の末尾 `+`/`-` は除く）
       1a. `OTHER_PATTERNS`（A・C・L・Q・U・F 以外の英大文字1字+数字1〜2桁。例 `R10`・`N24`、および `AWG`+数字）→ `OTHER`
       1b. `FORCED_REGION_NAME_PATTERNS`（`CN`+ハイフンを含む・英字+数字2桁・`A`+数字1桁。
           例 `CN-IF2-1`・`THM01`・`CNE06`・`A1`）→ `REGION_NAME`（追加機器符号に一致しても）
@@ -396,6 +409,10 @@ def classify_label(text: str) -> str:
     judgment = _judgment_text(normalize_label(text))
     if not judgment or _SINGLE_LETTER.match(judgment) or _TRAILING_SIGN.match(judgment):
         return OTHER
+    if _JAPANESE.search(judgment):
+        return OTHER
+    if judgment.startswith(TB_PREFIX):
+        return DESIGNATOR
     if any(rx.match(judgment) for rx in OTHER_PATTERNS):
         return OTHER
     if any(rx.match(judgment) for rx in FORCED_REGION_NAME_PATTERNS):
