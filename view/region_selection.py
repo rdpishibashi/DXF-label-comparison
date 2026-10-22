@@ -720,7 +720,7 @@ def region_confirmation_targets(analyses, checked_names):
     return targets
 
 
-def render_region_confirmation_section(analyses, locked, action='抽出'):
+def render_region_confirmation_section(analyses, locked, action='抽出', file_preview=None):
     """「領域の確認」セクション: 「領域一覧」でチェック済みの候補が2件以上
     残っている領域（＝どれを採用するか競合している領域）だけを対象に、
     チェック済み候補のみの名称候補チェックボックス群を表示する。チェック済み
@@ -732,7 +732,11 @@ def render_region_confirmation_section(analyses, locked, action='抽出'):
     表示するかどうか（領域検出済み かつ「領域選択を完了」済み）は呼び出し側が
     判定する。表示対象ファイルが1件も無い場合（＝全領域が「領域一覧」で決定済み）
     は、見出し・キャプションを含めセクション自体を一切描画しない（2026-09-10
-    ユーザー指定。何のアクションも取れない「空」の状態を見せないため）。"""
+    ユーザー指定。何のアクションも取れない「空」の状態を見せないため）。
+
+    `file_preview(fname, analysis, pending_regions)`: 呼び出し側固有の図面表示
+    （DXF-extract-labels のみ使用。既定 None で従来どおり）。エラーの無いファイルごとに、
+    領域ごとの名称候補より前に呼ばれる。"""
     checked_names = global_checked_region_names()
     targets = region_confirmation_targets(analyses, checked_names)
     if not targets:
@@ -772,6 +776,9 @@ def render_region_confirmation_section(analyses, locked, action='抽出'):
         if err:
             st.warning(err)
             continue
+
+        if file_preview is not None:
+            file_preview(fname, analysis, pending_regions)
 
         for reg_idx, reg in enumerate(pending_regions):
             if reg_idx > 0:
