@@ -258,6 +258,14 @@ def gather_name_selections(fname, analysis):
         label = unnamed_labels.get(reg['id'])
         if _region_excluded(reg, excluded_names, label):
             continue
+        if st.session_state.get(f"rc_{fname}_{reg['id']}_typed"):
+            # 「領域名を入力」（確定済み・無名の領域の名称変更を含む）が最優先。
+            # 枠内のラベルと完全一致したときだけ採用し、不一致は未選択
+            matched = match_typed_region_name(
+                st.session_state.get(f"rc_{fname}_{reg['id']}_typedtext", ''),
+                analysis.get('labels', []))
+            name_selections[(fname, reg['id'])] = [matched] if matched else ['']
+            continue
         if label is not None:
             # 無名領域は「特定」が既定ON（従来から自動で "no name" として採用していた
             # ため）。「領域一覧」で明示的にOFFにしたときだけ採用しない（['']=採用しない
@@ -275,14 +283,6 @@ def gather_name_selections(fname, analysis):
         by_other = resolve_by_other_frames(reg, analysis, checked_names, excluded_names)
         if by_other is not None:
             name_selections[(fname, reg['id'])] = [by_other]
-            continue
-        if st.session_state.get(f"rc_{fname}_{reg['id']}_typed"):
-            # 「領域名を入力」: 枠内のラベルと完全一致したときだけ採用（不一致は未選択）
-            matched = match_typed_region_name(
-                st.session_state.get(f"rc_{fname}_{reg['id']}_typedtext", ''),
-                analysis.get('labels', []))
-            if matched:
-                name_selections[(fname, reg['id'])] = [matched]
             continue
         pending_cands = pending_candidates_for_region(reg, checked_names)
         chosen = []
@@ -327,6 +327,12 @@ def ensure_choice_defaults(fname, reg, cands, analyses, checked_names):
     st.session_state.setdefault(_rc_key(fname, reg['id'], 'none'), False)
     st.session_state.setdefault(_rc_key(fname, reg['id'], 'typed'), False)
     st.session_state.setdefault(_rc_key(fname, reg['id'], 'typedtext'), '')
+
+
+def ensure_typed_defaults(fname, reg_id):
+    """「領域名を入力」の状態（正本）を未設定なら初期化する（確定済み・無名の領域の名称変更用）。"""
+    st.session_state.setdefault(_rc_key(fname, reg_id, 'typed'), False)
+    st.session_state.setdefault(_rc_key(fname, reg_id, 'typedtext'), '')
 
 
 def on_change_typed(fname, reg_id, n_cands):
@@ -385,6 +391,8 @@ def apply_viewer_choice(fname, reg, kind, checked_names, idx=None, text='', type
     elif kind == 'typed':
         st.session_state[_rc_key(fname, reg_id, 'typed')] = True
         on_change_typed(fname, reg_id, len(cands))
+    elif kind == 'typedoff':
+        st.session_state[_rc_key(fname, reg_id, 'typed')] = False
     elif kind == 'typedtext':
         st.session_state[_rc_key(fname, reg_id, 'typedtext')] = typed_text or ''
         st.session_state[_rc_key(fname, reg_id, 'typed')] = True
