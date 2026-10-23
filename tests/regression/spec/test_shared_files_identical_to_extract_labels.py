@@ -27,6 +27,7 @@ SHARED_FILES = (
     'model/designator_master.py',
     'assets/designator_digests.txt',
     'model/region_decisions.py',
+    'model/region_choices.py',
     'view/region_selection.py',
     'config.py',
 )
