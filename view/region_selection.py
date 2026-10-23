@@ -19,11 +19,15 @@ DXF-label-comparison にバイト一致のコピーがあり、同プロジェ�
   - `region_list_editor`: 「領域一覧」表のウィジェット状態（key用ver・元データ・
     最後に書いたチェック状態）。チェック操作で表を作り直さないための固定用
   - `rc_<ファイルキー>_<領域id>_<i>` / `rc_<ファイルキー>_<領域id>_none`:
-    「領域の確認」のチェック状態
+    「領域の確認」の選択状態の**正本**（widget key ではない。ページ上のチェックボックスは
+    `rcw_…` で、毎回この正本から写す。viewer ON のときにチェックボックスを描かない回があっても
+    Streamlit に消されないようにするため）。`_typed`（「領域名を入力」を選んだか）・
+    `_typedtext`（入力文字列）も同じ正本
 """
 import contextlib
 import os
 import time
+import unicodedata
 
 import pandas as pd
 import streamlit as st
@@ -272,6 +276,14 @@ def gather_name_selections(fname, analysis):
         if by_other is not None:
             name_selections[(fname, reg['id'])] = [by_other]
             continue
+        if st.session_state.get(f"rc_{fname}_{reg['id']}_typed"):
+            # 「領域名を入力」: 枠内のラベルと完全一致したときだけ採用（不一致は未選択）
+            matched = match_typed_region_name(
+                st.session_state.get(f"rc_{fname}_{reg['id']}_typedtext", ''),
+                analysis.get('labels', []))
+            if matched:
+                name_selections[(fname, reg['id'])] = [matched]
+            continue
         pending_cands = pending_candidates_for_region(reg, checked_names)
         chosen = []
         for i, (_d, t) in enumerate(pending_cands):
@@ -280,6 +292,103 @@ def gather_name_selections(fname, analysis):
         if chosen:
             name_selections[(fname, reg['id'])] = chosen
     return name_selections
+
+
+def normalize_typed_name(text):
+    """「領域名を入力」の照合用の正規化: NFKC（全角→半角）・前後の空白除去・英大文字化。"""
+    return unicodedata.normalize('NFKC', text or '').strip().upper()
+
+
+def match_typed_region_name(text, labels):
+    """入力された領域名を、図面枠内のラベル `labels`（`(text, x, y)` のリスト）と照合する。
+
+    `normalize_typed_name()` した文字列どうしが**完全一致**する最初のラベルの
+    **元の文字列**を返す。入力が空・一致するラベルが無ければ None（＝未選択）。"""
+    key = normalize_typed_name(text)
+    if not key:
+        return None
+    for label in labels:
+        if normalize_typed_name(label[0]) == key:
+            return label[0]
+    return None
+
+
+def _rc_key(fname, reg_id, suffix):
+    return f"rc_{fname}_{reg_id}_{suffix}"
+
+
+def ensure_choice_defaults(fname, reg, cands, analyses, checked_names):
+    """この領域の選択状態（正本 `rc_…`）が未設定なら既定値で初期化する。
+    viewer ON/OFF のどちらの経路でも、領域を**表示順に**呼ぶこと（既定の候補は
+    他領域の選択状態に依存するため）。"""
+    default_idx = compute_default_candidate_index(fname, reg, cands, analyses, checked_names)
+    for i in range(len(cands)):
+        st.session_state.setdefault(_rc_key(fname, reg['id'], i), i == default_idx)
+    st.session_state.setdefault(_rc_key(fname, reg['id'], 'none'), False)
+    st.session_state.setdefault(_rc_key(fname, reg['id'], 'typed'), False)
+    st.session_state.setdefault(_rc_key(fname, reg['id'], 'typedtext'), '')
+
+
+def on_change_typed(fname, reg_id, n_cands):
+    """「領域名を入力」を選んだとき、同一領域の候補・「領域選択しない」を OFF にする
+    （他領域には伝播しない）。"""
+    if not st.session_state.get(_rc_key(fname, reg_id, 'typed'), False):
+        return
+    for j in range(n_cands):
+        st.session_state[_rc_key(fname, reg_id, j)] = False
+    st.session_state[_rc_key(fname, reg_id, 'none')] = False
+
+
+def _sync_widget_to_canonical(wkey, key):
+    st.session_state[key] = st.session_state.get(wkey, False)
+
+
+def on_widget_radio(fname, reg_id, clicked_idx, n_cands, clicked_text, checked_names):
+    """ページ上の候補チェックボックス（`rcw_…`）の変更を正本へ写してから既存の挙動を行う。"""
+    suffix = clicked_idx
+    _sync_widget_to_canonical(f"rcw_{fname}_{reg_id}_{suffix}", _rc_key(fname, reg_id, suffix))
+    on_change_radio(fname, reg_id, clicked_idx, n_cands, clicked_text, checked_names)
+
+
+def on_widget_none(fname, reg_id, n_cands, checked_names):
+    _sync_widget_to_canonical(f"rcw_{fname}_{reg_id}_none", _rc_key(fname, reg_id, 'none'))
+    on_change_none(fname, reg_id, n_cands, checked_names)
+
+
+def on_widget_typed(fname, reg_id, n_cands):
+    _sync_widget_to_canonical(f"rcw_{fname}_{reg_id}_typed", _rc_key(fname, reg_id, 'typed'))
+    on_change_typed(fname, reg_id, n_cands)
+
+
+def on_widget_typedtext(fname, reg_id, n_cands):
+    """入力欄の変更（何度でも入力し直せる）。入力した時点で「領域名を入力」を選んだ扱いにする。"""
+    st.session_state[_rc_key(fname, reg_id, 'typedtext')] = st.session_state.get(
+        f"rcwt_{fname}_{reg_id}", '')
+    st.session_state[_rc_key(fname, reg_id, 'typed')] = True
+    on_change_typed(fname, reg_id, n_cands)
+
+
+def apply_viewer_choice(fname, reg, kind, checked_names, idx=None, text='', typed_text=None):
+    """viewer（ブラウザ内）での選択を正本へ反映する。ページ上のチェックボックスと同じ
+    コールバックを通すので、他領域への伝播・排他は同じ挙動になる。
+
+    kind: 'cand'（候補 idx を選ぶ）／'none'（領域選択しない）／'typed'（領域名を入力を選ぶ）／
+    'typedtext'（入力文字列を更新。選んだ扱いにする）"""
+    cands = pending_candidates_for_region(reg, checked_names)
+    reg_id = reg['id']
+    if kind == 'cand':
+        st.session_state[_rc_key(fname, reg_id, idx)] = True
+        on_change_radio(fname, reg_id, idx, len(cands), text, checked_names)
+    elif kind == 'none':
+        st.session_state[_rc_key(fname, reg_id, 'none')] = True
+        on_change_none(fname, reg_id, len(cands), checked_names)
+    elif kind == 'typed':
+        st.session_state[_rc_key(fname, reg_id, 'typed')] = True
+        on_change_typed(fname, reg_id, len(cands))
+    elif kind == 'typedtext':
+        st.session_state[_rc_key(fname, reg_id, 'typedtext')] = typed_text or ''
+        st.session_state[_rc_key(fname, reg_id, 'typed')] = True
+        on_change_typed(fname, reg_id, len(cands))
 
 
 def on_change_radio(fname, reg_id, clicked_idx, n_cands, clicked_text, checked_names):
@@ -312,6 +421,7 @@ def on_change_radio(fname, reg_id, clicked_idx, n_cands, clicked_text, checked_n
         if j != clicked_idx:
             st.session_state[f"rc_{fname}_{reg_id}_{j}"] = False
     st.session_state[f"rc_{fname}_{reg_id}_none"] = False  # 実候補を選んだら「領域選択しない」を解除
+    st.session_state[f"rc_{fname}_{reg_id}_typed"] = False  # 「領域名を入力」も解除
 
     analyses = st.session_state.get(ANALYSES_KEY, {})
     clicked_region = next(
@@ -322,6 +432,8 @@ def on_change_radio(fname, reg_id, clicked_idx, n_cands, clicked_text, checked_n
         for r2 in an2.get('regions', []):
             if fn2 == fname and r2['id'] == reg_id:
                 continue
+            if st.session_state.get(f"rc_{fn2}_{r2['id']}_typed"):
+                continue  # 「領域名を入力」を選んだ領域には伝播しない
             cands2 = pending_candidates_for_region(r2, checked_names)
             if len(cands2) <= 1:
                 continue  # 選択肢なし（自動確定）の領域は対象外
@@ -383,6 +495,7 @@ def on_change_none(fname, reg_id, n_cands, checked_names):
         return
     for j in range(n_cands):
         st.session_state[f"rc_{fname}_{reg_id}_{j}"] = False
+    st.session_state[f"rc_{fname}_{reg_id}_typed"] = False  # 「領域名を入力」も解除
 
     analyses = st.session_state.get(ANALYSES_KEY, {})
     clicked_region = next(
@@ -396,6 +509,8 @@ def on_change_none(fname, reg_id, n_cands, checked_names):
         for r2 in an2.get('regions', []):
             if fn2 == fname and r2['id'] == reg_id:
                 continue
+            if st.session_state.get(f"rc_{fn2}_{r2['id']}_typed"):
+                continue  # 「領域名を入力」を選んだ領域には伝播しない
             cands2 = pending_candidates_for_region(r2, checked_names)
             if not any(t2 in clicked_texts for _d2, t2 in cands2):
                 continue  # この領域の候補を1つも持たない他領域には影響しない
@@ -731,7 +846,8 @@ def region_confirmation_targets(analyses, checked_names):
     return targets
 
 
-def render_region_confirmation_section(analyses, locked, action='抽出', file_preview=None):
+def render_region_confirmation_section(analyses, locked, action='抽出', file_preview=None,
+                                       allow_typed_name=False):
     """「領域の確認」セクション: 「領域一覧」でチェック済みの候補が2件以上
     残っている領域（＝どれを採用するか競合している領域）だけを対象に、
     チェック済み候補のみの名称候補チェックボックス群を表示する。チェック済み
@@ -747,7 +863,13 @@ def render_region_confirmation_section(analyses, locked, action='抽出', file_p
 
     `file_preview(fname, analysis, pending_regions)`: 呼び出し側固有の図面表示
     （DXF-extract-labels のみ使用。既定 None で従来どおり）。エラーの無いファイルごとに、
-    領域ごとの名称候補より前に呼ばれる。"""
+    領域ごとの名称候補より前に呼ばれる。**真（truthy）を返したファイルは、ページ上の領域ごとの
+    ブロック（名称候補・📐・行き止まり枝）を描かない**（呼び出し側の viewer で同じ選択状態を
+    操作するため）。選択状態は viewer の有無にかかわらず正本 `rc_…` に持つ。
+
+    `allow_typed_name`（既定 False。DXF-extract-labels のみ True）: 選択肢に「領域名を入力」を
+    加える。入力は `match_typed_region_name()` で図面枠内のラベルと完全一致したときだけ採用し、
+    何度でも入力し直せる。"""
     checked_names = global_checked_region_names()
     targets = region_confirmation_targets(analyses, checked_names)
     if not targets:
@@ -788,8 +910,14 @@ def render_region_confirmation_section(analyses, locked, action='抽出', file_p
             st.warning(err)
             continue
 
-        if file_preview is not None:
-            file_preview(fname, analysis, pending_regions)
+        # 選択状態（正本）を表示順に初期化する。viewer ON/OFF のどちらでも先に行う
+        for reg in pending_regions:
+            ensure_choice_defaults(
+                fname, reg, pending_candidates_for_region(reg, checked_names),
+                analyses, checked_names)
+
+        if file_preview is not None and file_preview(fname, analysis, pending_regions):
+            continue  # 呼び出し側の viewer で選択する
 
         for reg_idx, reg in enumerate(pending_regions):
             if reg_idx > 0:
@@ -812,17 +940,15 @@ def render_region_confirmation_section(analyses, locked, action='抽出', file_p
             # （未チェックの候補は「採用しない」という意思表示とみなし、
             # 選択肢自体に出さない。2026-07-30 ユーザー指定）。
             cands = pending_candidates_for_region(reg, checked_names)
-            default_idx = compute_default_candidate_index(
-                fname, reg, cands, analyses, checked_names)
 
+            # チェックボックスの widget key は `rcw_…`。毎回、正本 `rc_…` から写す
             for i, (d, t) in enumerate(cands):
-                ck = f"rc_{fname}_{reg['id']}_{i}"
-                if ck not in st.session_state:
-                    st.session_state[ck] = (i == default_idx)
+                wkey = f"rcw_{fname}_{reg['id']}_{i}"
+                st.session_state[wkey] = st.session_state[_rc_key(fname, reg['id'], i)]
                 st.checkbox(
                     f"　{t}　（境界線からの距離 {d:.0f}）",
-                    key=ck,
-                    on_change=on_change_radio,
+                    key=wkey,
+                    on_change=on_widget_radio,
                     args=(fname, reg['id'], i, len(cands), t, checked_names),
                     disabled=locked,
                 )
@@ -830,13 +956,40 @@ def render_region_confirmation_section(analyses, locked, action='抽出', file_p
             # 領域選択しない（この領域にはどの名称候補も割り当てない）。
             # 既定は未チェック（従来通りいずれかの候補が既定選択される）で、
             # ユーザーが明示的に選んだときだけこの領域を無名扱いにする。
-            ck_none = f"rc_{fname}_{reg['id']}_none"
-            if ck_none not in st.session_state:
-                st.session_state[ck_none] = False
+            wkey_none = f"rcw_{fname}_{reg['id']}_none"
+            st.session_state[wkey_none] = st.session_state[_rc_key(fname, reg['id'], 'none')]
             st.checkbox(
                 "　（領域選択しない）",
-                key=ck_none,
-                on_change=on_change_none,
+                key=wkey_none,
+                on_change=on_widget_none,
                 args=(fname, reg['id'], len(cands), checked_names),
                 disabled=locked,
             )
+
+            if allow_typed_name:
+                wkey_typed = f"rcw_{fname}_{reg['id']}_typed"
+                st.session_state[wkey_typed] = st.session_state[_rc_key(fname, reg['id'], 'typed')]
+                st.checkbox(
+                    "　領域名を入力",
+                    key=wkey_typed,
+                    on_change=on_widget_typed,
+                    args=(fname, reg['id'], len(cands)),
+                    disabled=locked,
+                )
+                wkey_text = f"rcwt_{fname}_{reg['id']}"
+                st.session_state[wkey_text] = st.session_state[_rc_key(fname, reg['id'], 'typedtext')]
+                st.text_input(
+                    "領域名を入力", key=wkey_text, label_visibility="collapsed",
+                    placeholder="図面枠内のラベルと完全に一致する領域名（全角・小文字も可）",
+                    on_change=on_widget_typedtext,
+                    args=(fname, reg['id'], len(cands)),
+                    disabled=locked,
+                )
+                if st.session_state[_rc_key(fname, reg['id'], 'typed')]:
+                    matched = match_typed_region_name(
+                        st.session_state[_rc_key(fname, reg['id'], 'typedtext')],
+                        analysis.get('labels', []))
+                    if matched:
+                        st.caption(f"　採用: {matched}")
+                    else:
+                        st.caption("　一致するラベルなし（この領域は未選択になります）")
