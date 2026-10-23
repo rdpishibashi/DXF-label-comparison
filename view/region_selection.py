@@ -927,7 +927,7 @@ def render_region_confirmation_section(analyses, locked, action='抽出', file_p
 
     def _needs_choice(item):
         _f, a, pend = item
-        return bool(pend)
+        return bool(pend or (show_unnamed and unnamed_region_labels(a)))
 
     if show_all:
         n_choice = sum(1 for it in targets if _needs_choice(it))
@@ -952,11 +952,37 @@ def render_region_confirmation_section(analyses, locked, action='抽出', file_p
         with container:
             _render_confirmation_file(
                 fname, analysis, pending_regions, analyses, checked_names, locked,
-                file_preview, allow_typed_name, show_all)
+                file_preview, allow_typed_name, show_all, show_unnamed)
+
+
+def render_region_info_rows(regions):
+    """選択の必要がある領域ごとに、📐（頂点の座標）と⚠️（行き止まり枝）をポップオーバーで出す。
+    開閉枠の中に置くため、エクスパンダーは使えない（入れ子不可）のでポップオーバーにする。"""
+    for reg in regions:
+        col_header, col_c, col_d = st.columns([6, 1, 2])
+        col_header.markdown(f"　**図面{reg['frame'] + 1} / 領域{reg['id'] + 1}**　面積 {reg['area_pct']:.0f}%")
+        with col_c:
+            render_corners_popover(reg.get('corners', []))
+        dangling = reg.get('dangling_edges', [])
+        if dangling:
+            with col_d, st.popover(f"⚠️ 行き止まり枝（{len(dangling)} 件）"):
+                st.caption(
+                    "この領域の境界探索から除外された、どこにも閉じていない線分（境界線と同じ線種 "
+                    "lineweight=25/color=2）です。手描きの作画ミスの可能性があるため、該当する handle "
+                    "を確認してください。")
+                lines = []
+                for br in dangling:
+                    att = br.get('attachment')
+                    lines.append(f"取り付け点 {f'({att[0]:.2f}, {att[1]:.2f})' if att else '(不明)'}:")
+                    for ent in br['entities']:
+                        (sx, sy), (ex, ey) = ent['start'], ent['end']
+                        lines.append(f"  handle {ent['handle'] or '(handle不明)'}: "
+                                     f"({sx:.2f}, {sy:.2f}) - ({ex:.2f}, {ey:.2f})")
+                st.code('\n'.join(lines))
 
 
 def _render_confirmation_file(fname, analysis, pending_regions, analyses, checked_names, locked,
-                              file_preview, allow_typed_name, show_all):
+                              file_preview, allow_typed_name, show_all, show_unnamed=False):
     """「領域の確認」の1ファイル分（`render_region_confirmation_section()` の本体の一部）。"""
     err = analysis.get('error')
     st.markdown(f"### {fname}")
@@ -989,6 +1015,11 @@ def _render_confirmation_file(fname, analysis, pending_regions, analyses, checke
             analyses, checked_names)
 
     if file_preview is not None and file_preview(fname, analysis, pending_regions):
+        if show_all:  # 開閉枠の中に、選択が必要な領域の📐・行き止まり枝を出す
+            unnamed_ids = set(unnamed_region_labels(analysis)) if show_unnamed else set()
+            render_region_info_rows([
+                r for r in analysis.get('regions', [])
+                if r in pending_regions or r['id'] in unnamed_ids])
         return  # 呼び出し側の viewer で選択する
 
     for reg_idx, reg in enumerate(pending_regions):
