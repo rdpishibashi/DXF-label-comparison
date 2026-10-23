@@ -35,11 +35,13 @@ import streamlit as st
 from model.common_utils import save_uploadedfile, normalize_width
 from model.region_detector import (
     DEFAULT_REGION_CONFIG, regions_overlap,
-    resolve_globally_decided_name, is_region_pending_selection,
     pending_candidates_for_region,
 )
 from model.extraction_pipeline import detect_file_regions, extract_file_data
-from model.ref_designator import unnamed_region_labels
+from model.region_decisions import (
+    DECIDED, EXCLUDED, OTHER_FRAME, PENDING, UNNAMED, UNSPECIFIED,
+    classify_regions, region_excluded, resolve_by_other_frames,
+)
 
 # 「領域一覧」セクションの見出し（2026-10-17 ユーザー指定で改称。コード中の「領域一覧」は同じ
 # セクションを指す。Excel のシート名 `領域一覧` は別物で変えない）
@@ -170,141 +172,91 @@ def global_excluded_region_names():
     }
 
 
-def _region_excluded(reg, excluded_names, unnamed_label=None):
-    """この領域の名称候補のいずれかが「除外」指定されているかを判定する
-    （`model.ref_designator.excluded_region_ids()` と同じ正規化規約。v3.11.0新設）。
-    名称候補が0件の無名領域は、「領域一覧」の表示名（`unnamed_label`）が除外指定
-    されているかで判定する（2026-10-10 ユーザー決定。以前は無名領域は除外対象外）。"""
-    if not excluded_names:
-        return False
-    if unnamed_label is not None and unnamed_label in excluded_names:
-        return True
-    return any(
-        normalize_width(text) in excluded_names
-        for (_dist, text) in reg.get('name_candidates', [])
-    )
+# 判定の本体は `model/region_decisions.py`。app.py・テストが使う従来の名前を残す
+_region_excluded = region_excluded
 
 
-def resolve_by_other_frames(reg, analysis, checked_names, excluded_names):
-    """要選択の領域 `reg` を、同じファイルの**別の図面枠**で自動決定済みの名称で決める
-    （2026-10-17 ユーザー指定）。
-
-    `reg` の「領域一覧」チェック済み候補のうち、別の図面枠の領域が
-    `resolve_globally_decided_name()` で決定した名称（NFKC正規化して比較。「除外」指定の
-    領域は根拠にしない）と一致するものが**ちょうど1種類**ならその候補テキストを返す。
-    0種類・2種類以上なら None（従来どおり「領域の確認」で選ばせる）。同じ図面枠内の
-    別領域で決まった名称は根拠にしない（同一図面内の入れ子・隣接領域は別の物理領域のため）。
-    """
-    decided = set()
-    for r2 in analysis.get('regions', []):
-        if r2.get('frame') == reg.get('frame') or _region_excluded(r2, excluded_names):
-            continue
-        name = resolve_globally_decided_name(r2, checked_names)
-        if name is not None:
-            decided.add(normalize_width(name))
-    matches = {}
-    for _d, t in pending_candidates_for_region(reg, checked_names):
-        if normalize_width(t) in decided:
-            matches.setdefault(normalize_width(t), t)
-    return next(iter(matches.values())) if len(matches) == 1 else None
+def classify_file_regions(analysis):
+    """この図面の通常領域の分類 `{領域id: RegionDecision}`（セッションの「特定」「除外」を反映）。
+    名称なし領域の「特定」は `grc_<表示名>`（キーが無ければON）。"""
+    return classify_regions(
+        analysis, global_checked_region_names(), global_excluded_region_names(),
+        unnamed_adopted=lambda label: st.session_state.get(f"grc_{label}", True))
 
 
 def unconditional_region_names(analyses):
-    """「領域の確認」を経ずに決まる領域名（NFKC正規化済みの集合。2026-10-17 ユーザー指定）。
+    """「領域の確認」を経ずに決まる領域名（NFKC正規化済みの集合）。
 
-    各ファイルの通常領域のうち「除外」指定でないものについて、
-      (a) 「領域一覧」のチェックで候補がちょうど1件に決まる名称（`resolve_globally_decided_name()`）
-      (b) 要選択（チェック済み候補が2件以上）だが同じファイルの別の図面枠で決まった名称で
-          決まるもの（`resolve_by_other_frames()`）
-    の名称を集める。「領域の確認」で手動選択した名称は含まれない。5%未満の小領域の採用対象
+    各ファイルの通常領域のうち、「抽出領域の選択」のチェックで候補がちょうど1件に決まる名称
+    （DECIDED）と、同じファイルの別の図面枠で決まった名称で決まるもの（OTHER_FRAME）を集める。
+    「領域の確認」で手動選択した名称は含まれない。5%未満の小領域の採用対象
     （`ref_designator.add_minor_region_selections()` の `target_names`）に使う。
     """
-    checked_names = global_checked_region_names()
-    excluded_names = global_excluded_region_names()
     names = set()
     for analysis in analyses.values():
-        for reg in analysis.get('regions', []):
-            if _region_excluded(reg, excluded_names):
-                continue
-            name = resolve_globally_decided_name(reg, checked_names)
-            if name is None and is_region_pending_selection(reg, checked_names):
-                name = resolve_by_other_frames(reg, analysis, checked_names, excluded_names)
-            if name is not None:
-                names.add(normalize_width(name))
+        for d in classify_file_regions(analysis).values():
+            if d.status in (DECIDED, OTHER_FRAME):
+                names.add(normalize_width(d.name))
     return names
 
 
 def gather_name_selections(fname, analysis):
-    """この図面の領域名選択を集める。「領域一覧」でのグローバル決定（優先）と、
-    「領域の確認」での個別選択（チェック済み候補が2件以上ある領域のみ）を統合する。
+    """この図面の領域名選択を集める。領域の分類（`classify_regions()`）に、「領域の確認」での
+    個別の上書きを重ねる。
 
-    「領域一覧」でチェックされなかった候補は「採用しない」という意思表示と
-    みなす（2026-07-30 ユーザー指定）。そのため、候補が0件チェック済みの
-    領域はここでは何も返さない（無所属のまま。候補が元々0件の無名領域は
-    呼び出し先の `ref_designator.build_named_regions()` 等が自動 "no name"
-    命名を行う。無名領域の「特定」「除外」は「領域一覧」の表示名で判定する）。
+    - 除外: 名称を決めない。除外領域のラベルは `ref_designator.filter_labels_outside_excluded()`
+      が出力から取り除く。
+    - 特定OFF（UNSPECIFIED）: 何も返さない。「領域の確認」の入力名・採用しない印が残っていても
+      無視する（「抽出領域の選択」で候補を外した以上、その領域は名称を採用しない）。
+    - 「（領域選択しない）」（`_skip`。要選択でない領域用）: 採用しない印（`['']`）。入力名より優先
+      （入力名は保持され、「領域選択しない」を外すと入力名に戻る）。
+    - 「領域名を入力」（`_typed`）: 枠内のラベルと完全一致したときだけ採用し、不一致は未選択
+      （`['']`）。確定済み・無名の領域の名称変更も同じ。
+    - 名称なし: 「特定」がOFFのときだけ `['']`。ONなら `build_named_regions()` が自動で "no name" にする。
+    - 確定・別の図面枠で決まった名称: その名称。
+    - 要選択: 「領域の確認」で選ばれた候補（無ければ何も返さない）。
 
-    「除外」指定された領域はここでは一切名称を決定しない（v3.11.0新設）。
-    除外領域のラベルは `ref_designator.filter_labels_outside_excluded()` に
-    よって名称採用の有無とは無関係に出力から取り除かれるため、ここで名称を
-    決定しても最終結果には影響しないが、「除外は名称採用の判断自体をしない」
-    という仕様を明確にするため、あえて候補走査の対象外にする。
+    候補の選択は、最後に初期化したときの候補の文字列（`rc_…_cands`）で解釈する。
+    チェック済み候補が増減して番号がずれても、選んだ名称は変わらない。
     """
-    checked_names = global_checked_region_names()
-    excluded_names = global_excluded_region_names()
-    unnamed_labels = unnamed_region_labels(analysis)
     name_selections = {}
+    decisions = classify_file_regions(analysis)
     for reg in analysis.get('regions', []):
-        label = unnamed_labels.get(reg['id'])
-        if _region_excluded(reg, excluded_names, label):
+        d = decisions[reg['id']]
+        rid = reg['id']
+        if d.status in (EXCLUDED, UNSPECIFIED):
             continue
-        if st.session_state.get(f"rc_{fname}_{reg['id']}_typed"):
-            # 「領域名を入力」（確定済み・無名の領域の名称変更を含む）が最優先。
-            # 枠内のラベルと完全一致したときだけ採用し、不一致は未選択
+        if d.status != PENDING and st.session_state.get(_rc_key(fname, rid, 'skip')):
+            name_selections[(fname, rid)] = ['']  # 入力名があっても採用しない
+            continue
+        if st.session_state.get(_rc_key(fname, rid, 'typed')):
             matched = match_typed_region_name(
-                st.session_state.get(f"rc_{fname}_{reg['id']}_typedtext", ''),
+                st.session_state.get(_rc_key(fname, rid, 'typedtext'), ''),
                 analysis.get('labels', []))
-            name_selections[(fname, reg['id'])] = [matched] if matched else ['']
+            name_selections[(fname, rid)] = [matched] if matched else ['']
             continue
-        if st.session_state.get(f"rc_{fname}_{reg['id']}_skip") and not _is_choice_region(
-                reg, label, analysis, checked_names, excluded_names):
-            # 確定済み・無名の領域で「（領域選択しない）」を選んだ（採用しない印）
-            name_selections[(fname, reg['id'])] = ['']
+        if d.status == UNNAMED:
+            if not d.adopted:
+                name_selections[(fname, rid)] = ['']
             continue
-        if label is not None:
-            # 無名領域は「特定」が既定ON（従来から自動で "no name" として採用していた
-            # ため）。「領域一覧」で明示的にOFFにしたときだけ採用しない（['']=採用しない
-            # の印。`ref_designator.build_named_regions()` 参照）。「領域一覧」に出さない
-            # 呼び出し側（DXF-label-comparison）ではキーが無いので従来どおり採用される。
-            if not st.session_state.get(f"grc_{label}", True):
-                name_selections[(fname, reg['id'])] = ['']
+        if d.status in (DECIDED, OTHER_FRAME):
+            name_selections[(fname, rid)] = [d.name]
             continue
-        decided = resolve_globally_decided_name(reg, checked_names)
-        if decided is not None:
-            name_selections[(fname, reg['id'])] = [decided]
-            continue
-        if not is_region_pending_selection(reg, checked_names):
-            continue
-        by_other = resolve_by_other_frames(reg, analysis, checked_names, excluded_names)
-        if by_other is not None:
-            name_selections[(fname, reg['id'])] = [by_other]
-            continue
-        pending_cands = pending_candidates_for_region(reg, checked_names)
-        chosen = []
-        for i, (_d, t) in enumerate(pending_cands):
-            if st.session_state.get(f"rc_{fname}_{reg['id']}_{i}"):
-                chosen.append(t)
+        chosen = _chosen_candidates(fname, rid, d.candidates)
         if chosen:
-            name_selections[(fname, reg['id'])] = chosen
+            name_selections[(fname, rid)] = chosen
     return name_selections
 
 
-def _is_choice_region(reg, unnamed_label, analysis, checked_names, excluded_names):
-    """この領域が、ユーザーが候補から選ぶ領域（要選択）かどうか。確定済み・無名の領域は False。"""
-    return (unnamed_label is None
-            and resolve_globally_decided_name(reg, checked_names) is None
-            and is_region_pending_selection(reg, checked_names)
-            and resolve_by_other_frames(reg, analysis, checked_names, excluded_names) is None)
+def _chosen_candidates(fname, reg_id, cands):
+    """要選択の領域で選ばれている候補の文字列のリスト。選択状態 `rc_…_<i>` の添字は、最後に
+    初期化したときの候補（`rc_…_cands`）に対するもの。スナップショットが無ければ現在の候補。"""
+    snap = st.session_state.get(_rc_key(fname, reg_id, 'cands'))
+    current = [t for _d, t in cands]
+    if snap is None:
+        snap = tuple(current)
+    return [t for i, t in enumerate(snap)
+            if st.session_state.get(_rc_key(fname, reg_id, i)) and t in current]
 
 
 def normalize_typed_name(text):
@@ -330,16 +282,47 @@ def _rc_key(fname, reg_id, suffix):
     return f"rc_{fname}_{reg_id}_{suffix}"
 
 
+def sync_choice_snapshot(fname, reg, cands, analyses, checked_names):
+    """候補の選択 `rc_…_<i>` の添字 `i` は、その領域に提示する候補（「抽出領域の選択」でチェック済みの
+    もの）の並びに対する番号。最後に添字を振ったときの候補の文字列を `rc_…_cands` に持ち、
+    候補が増減していたら、選んでいた名称を新しい並びへ引き継ぐ（選んでいた名称が無くなったら
+    既定の候補。「領域選択しない」「領域名を入力」は維持）。`rc_…_<i>` を現在の並びの添字で
+    読み書きする前に呼ぶ。スナップショットが無い（初期化前の）領域では何もしない。"""
+    rid = reg['id']
+    current = tuple(t for _d, t in cands)
+    snap = st.session_state.get(_rc_key(fname, rid, 'cands'))
+    if snap is None or snap == current:
+        return
+    selected = {snap[i] for i in range(len(snap))
+                if st.session_state.get(_rc_key(fname, rid, i))}
+    for i in range(len(snap)):
+        st.session_state.pop(_rc_key(fname, rid, i), None)
+    carried = [t in selected for t in current]
+    if (current and not any(carried)
+            and not st.session_state.get(_rc_key(fname, rid, 'none'))
+            and not st.session_state.get(_rc_key(fname, rid, 'typed'))):
+        carried[compute_default_candidate_index(
+            fname, reg, cands, analyses, checked_names)] = True
+    for j, on in enumerate(carried):
+        st.session_state[_rc_key(fname, rid, j)] = on
+    st.session_state[_rc_key(fname, rid, 'cands')] = current
+
+
 def ensure_choice_defaults(fname, reg, cands, analyses, checked_names):
     """この領域の選択状態（正本 `rc_…`）が未設定なら既定値で初期化する。
     viewer ON/OFF のどちらの経路でも、領域を**表示順に**呼ぶこと（既定の候補は
-    他領域の選択状態に依存するため）。"""
-    default_idx = compute_default_candidate_index(fname, reg, cands, analyses, checked_names)
-    for i in range(len(cands)):
-        st.session_state.setdefault(_rc_key(fname, reg['id'], i), i == default_idx)
-    st.session_state.setdefault(_rc_key(fname, reg['id'], 'none'), False)
-    st.session_state.setdefault(_rc_key(fname, reg['id'], 'typed'), False)
-    st.session_state.setdefault(_rc_key(fname, reg['id'], 'typedtext'), '')
+    他領域の選択状態に依存するため）。候補が変わっていれば選択を引き継ぐ
+    （`sync_choice_snapshot()`）。"""
+    rid = reg['id']
+    sync_choice_snapshot(fname, reg, cands, analyses, checked_names)
+    if st.session_state.get(_rc_key(fname, rid, 'cands')) is None:
+        default_idx = compute_default_candidate_index(fname, reg, cands, analyses, checked_names)
+        for i in range(len(cands)):
+            st.session_state.setdefault(_rc_key(fname, rid, i), i == default_idx)
+    st.session_state[_rc_key(fname, rid, 'cands')] = tuple(t for _d, t in cands)
+    st.session_state.setdefault(_rc_key(fname, rid, 'none'), False)
+    st.session_state.setdefault(_rc_key(fname, rid, 'typed'), False)
+    st.session_state.setdefault(_rc_key(fname, rid, 'typedtext'), '')
 
 
 def ensure_typed_defaults(fname, reg_id):
@@ -411,9 +394,9 @@ def apply_viewer_choice(fname, reg, kind, checked_names, idx=None, text='', type
         st.session_state[_rc_key(fname, reg_id, 'typedtext')] = ''
     elif kind == 'editnone':
         # 確定済み・無名の領域の「（領域選択しない）」。要選択の領域の `none` は他領域へ伝播して
-        # 立つことがあるので、別のキー `skip` に持つ（伝播されない）
+        # 立つことがあるので、別のキー `skip` に持つ（伝播されない）。入力名（`typed`）は保持し、
+        # 「領域選択しない」の間だけ採用されない（外すと入力名に戻る）
         st.session_state[_rc_key(fname, reg_id, 'skip')] = True
-        st.session_state[_rc_key(fname, reg_id, 'typed')] = False
     elif kind == 'editnoneoff':
         st.session_state[_rc_key(fname, reg_id, 'skip')] = False
     elif kind == 'typedtext':
@@ -473,6 +456,7 @@ def on_change_radio(fname, reg_id, clicked_idx, n_cands, clicked_text, checked_n
             if (fn2 == fname and clicked_polygon
                     and regions_overlap(clicked_polygon, r2['polygon'])):
                 continue  # 重なり（内包/部分重複）のある領域同士は同期しない
+            sync_choice_snapshot(fn2, r2, cands2, analyses, checked_names)
             for j2, (_d2, t2) in enumerate(cands2):
                 st.session_state[f"rc_{fn2}_{r2['id']}_{j2}"] = (t2 == clicked_text)
 
@@ -549,6 +533,7 @@ def on_change_none(fname, reg_id, n_cands, checked_names):
                           # docstring「候補1件のみ（自動確定）の領域も対象に含める」参照）
             if (fn2 == fname and regions_overlap(clicked_polygon, r2['polygon'])):
                 continue  # 重なり（内包/部分重複）のある領域同士は同期しない
+            sync_choice_snapshot(fn2, r2, cands2, analyses, checked_names)
             for j2, (_d2, t2) in enumerate(cands2):
                 if t2 in clicked_texts:
                     st.session_state[f"rc_{fn2}_{r2['id']}_{j2}"] = False
@@ -868,18 +853,19 @@ def region_confirmation_targets(analyses, checked_names, include_unnamed=False, 
         err = analysis.get('error')
         if err and FRAME_NOT_FOUND_ERROR_MARKER in err:
             continue  # 図面枠が見つからない既知の未対応ケースは表示しない
-        regions = analysis.get('regions', [])
+        decisions = classify_regions(analysis, checked_names, excluded_names)
         pending_regions = [
-            r for r in regions
-            if is_region_pending_selection(r, checked_names)
-            and not _region_excluded(r, excluded_names)
-            and resolve_by_other_frames(r, analysis, checked_names, excluded_names) is None
-        ]
+            r for r in analysis.get('regions', []) if decisions[r['id']].status == PENDING]
         if not include_all and not err and not pending_regions and not (
-                include_unnamed and unnamed_region_labels(analysis)):
+                include_unnamed and _unnamed_active_ids(decisions)):
             continue  # 個別選択が不要なファイルは表示しない
         targets.append((fname, analysis, pending_regions))
     return targets
+
+
+def _unnamed_active_ids(decisions):
+    """「除外」でない名称なし領域（`no name N`）の id 集合。除外した領域は確認の対象にしない。"""
+    return {rid for rid, d in decisions.items() if d.status == UNNAMED}
 
 
 def render_region_confirmation_section(analyses, locked, action='抽出', file_preview=None,
@@ -929,7 +915,8 @@ def render_region_confirmation_section(analyses, locked, action='抽出', file_p
 
     def _needs_choice(item):
         _f, a, pend = item
-        return bool(pend or (show_unnamed and unnamed_region_labels(a)))
+        return bool(pend or (show_unnamed and _unnamed_active_ids(
+            classify_regions(a, checked_names, global_excluded_region_names()))))
 
     if show_all:
         n_choice = sum(1 for it in targets if _needs_choice(it))
@@ -1018,7 +1005,7 @@ def _render_confirmation_file(fname, analysis, pending_regions, analyses, checke
 
     if file_preview is not None and file_preview(fname, analysis, pending_regions):
         if show_all:  # 開閉枠の中に、選択が必要な領域の📐・行き止まり枝を出す
-            unnamed_ids = set(unnamed_region_labels(analysis)) if show_unnamed else set()
+            unnamed_ids = _unnamed_active_ids(classify_file_regions(analysis)) if show_unnamed else set()
             render_region_info_rows([
                 r for r in analysis.get('regions', [])
                 if r in pending_regions or r['id'] in unnamed_ids])
