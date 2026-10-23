@@ -812,7 +812,7 @@ def render_global_region_names_section(candidate_names, locked, action='抽出',
             st.rerun()
 
 
-def region_confirmation_targets(analyses, checked_names):
+def region_confirmation_targets(analyses, checked_names, include_unnamed=False):
     """「領域の確認」に表示すべきファイルを判定する（純粋関数）。
 
     表示対象は次のいずれか:
@@ -825,6 +825,8 @@ def region_confirmation_targets(analyses, checked_names):
     は対象から除く。「除外」指定された領域は要選択候補の数に関わらず対象から
     除く（v3.11.0新設。§4決定2「除外領域は領域の確認に表示しない」）。同じファイルの別の
     図面枠で決まった名称で決められる領域も除く（`resolve_by_other_frames()`、2026-10-17）。
+    `include_unnamed`（既定 False。DXF-extract-labels のみ True）: 要選択の領域が無くても、
+    名称の無い領域（`no name N`）を持つファイルを対象に含める（図面上で確認できるようにするため）。
     戻り値はファイルキーでソートした `[(fname, analysis, pending_regions), ...]`。
     """
     excluded_names = global_excluded_region_names()
@@ -840,14 +842,15 @@ def region_confirmation_targets(analyses, checked_names):
             and not _region_excluded(r, excluded_names)
             and resolve_by_other_frames(r, analysis, checked_names, excluded_names) is None
         ]
-        if not err and not pending_regions:
+        if not err and not pending_regions and not (
+                include_unnamed and unnamed_region_labels(analysis)):
             continue  # 個別選択が不要なファイルは表示しない
         targets.append((fname, analysis, pending_regions))
     return targets
 
 
 def render_region_confirmation_section(analyses, locked, action='抽出', file_preview=None,
-                                       allow_typed_name=False):
+                                       allow_typed_name=False, show_unnamed=False):
     """「領域の確認」セクション: 「領域一覧」でチェック済みの候補が2件以上
     残っている領域（＝どれを採用するか競合している領域）だけを対象に、
     チェック済み候補のみの名称候補チェックボックス群を表示する。チェック済み
@@ -868,10 +871,11 @@ def render_region_confirmation_section(analyses, locked, action='抽出', file_p
     操作するため）。選択状態は viewer の有無にかかわらず正本 `rc_…` に持つ。
 
     `allow_typed_name`（既定 False。DXF-extract-labels のみ True）: 選択肢に「領域名を入力」を
-    加える。入力は `match_typed_region_name()` で図面枠内のラベルと完全一致したときだけ採用し、
+    加える。`show_unnamed`（既定 False。DXF-extract-labels のみ True）: 名称の無い領域（`no name N`）だけを
+    持つファイルも表示対象にする（`file_preview` の viewer で確認できる）。入力は `match_typed_region_name()` で図面枠内のラベルと完全一致したときだけ採用し、
     何度でも入力し直せる。"""
     checked_names = global_checked_region_names()
-    targets = region_confirmation_targets(analyses, checked_names)
+    targets = region_confirmation_targets(analyses, checked_names, include_unnamed=show_unnamed)
     if not targets:
         return
 
