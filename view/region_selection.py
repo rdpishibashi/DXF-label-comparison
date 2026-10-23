@@ -266,7 +266,7 @@ def gather_name_selections(fname, analysis):
                 analysis.get('labels', []))
             name_selections[(fname, reg['id'])] = [matched] if matched else ['']
             continue
-        if st.session_state.get(f"rc_{fname}_{reg['id']}_none") and not _is_choice_region(
+        if st.session_state.get(f"rc_{fname}_{reg['id']}_skip") and not _is_choice_region(
                 reg, label, analysis, checked_names, excluded_names):
             # 確定済み・無名の領域で「（領域選択しない）」を選んだ（採用しない印）
             name_selections[(fname, reg['id'])] = ['']
@@ -346,7 +346,7 @@ def ensure_typed_defaults(fname, reg_id):
     """「領域名を入力」の状態（正本）を未設定なら初期化する（確定済み・無名の領域の名称変更用）。"""
     st.session_state.setdefault(_rc_key(fname, reg_id, 'typed'), False)
     st.session_state.setdefault(_rc_key(fname, reg_id, 'typedtext'), '')
-    st.session_state.setdefault(_rc_key(fname, reg_id, 'none'), False)
+    st.session_state.setdefault(_rc_key(fname, reg_id, 'skip'), False)
 
 
 def on_change_typed(fname, reg_id, n_cands):
@@ -354,7 +354,7 @@ def on_change_typed(fname, reg_id, n_cands):
     （他領域には伝播しない）。"""
     if not st.session_state.get(_rc_key(fname, reg_id, 'typed'), False):
         return
-    st.session_state[_rc_key(fname, reg_id, 'none')] = False
+    st.session_state[_rc_key(fname, reg_id, 'skip')] = False
     for j in range(n_cands):
         st.session_state[_rc_key(fname, reg_id, j)] = False
     st.session_state[_rc_key(fname, reg_id, 'none')] = False
@@ -409,11 +409,13 @@ def apply_viewer_choice(fname, reg, kind, checked_names, idx=None, text='', type
     elif kind == 'typedoff':  # 確定済み・無名の領域で入力欄を空にした＝自動の名称に戻す
         st.session_state[_rc_key(fname, reg_id, 'typed')] = False
         st.session_state[_rc_key(fname, reg_id, 'typedtext')] = ''
-    elif kind == 'editnone':  # 確定済み・無名の領域の「（領域選択しない）」（他領域へは伝播しない）
-        st.session_state[_rc_key(fname, reg_id, 'none')] = True
+    elif kind == 'editnone':
+        # 確定済み・無名の領域の「（領域選択しない）」。要選択の領域の `none` は他領域へ伝播して
+        # 立つことがあるので、別のキー `skip` に持つ（伝播されない）
+        st.session_state[_rc_key(fname, reg_id, 'skip')] = True
         st.session_state[_rc_key(fname, reg_id, 'typed')] = False
     elif kind == 'editnoneoff':
-        st.session_state[_rc_key(fname, reg_id, 'none')] = False
+        st.session_state[_rc_key(fname, reg_id, 'skip')] = False
     elif kind == 'typedtext':
         st.session_state[_rc_key(fname, reg_id, 'typedtext')] = typed_text or ''
         st.session_state[_rc_key(fname, reg_id, 'typed')] = True
