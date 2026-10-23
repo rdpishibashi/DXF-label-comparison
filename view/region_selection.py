@@ -208,9 +208,10 @@ def gather_name_selections(fname, analysis):
       が出力から取り除く。
     - 特定OFF（UNSPECIFIED）: 何も返さない。「領域の確認」の入力名・採用しない印が残っていても
       無視する（「抽出領域の選択」で候補を外した以上、その領域は名称を採用しない）。
+    - 「（領域選択しない）」（`_skip`。要選択でない領域用）: 採用しない印（`['']`）。入力名より優先
+      （入力名は保持され、「領域選択しない」を外すと入力名に戻る）。
     - 「領域名を入力」（`_typed`）: 枠内のラベルと完全一致したときだけ採用し、不一致は未選択
       （`['']`）。確定済み・無名の領域の名称変更も同じ。
-    - 「（領域選択しない）」（`_skip`。要選択でない領域用）: 採用しない印（`['']`）。
     - 名称なし: 「特定」がOFFのときだけ `['']`。ONなら `build_named_regions()` が自動で "no name" にする。
     - 確定・別の図面枠で決まった名称: その名称。
     - 要選択: 「領域の確認」で選ばれた候補（無ければ何も返さない）。
@@ -225,14 +226,14 @@ def gather_name_selections(fname, analysis):
         rid = reg['id']
         if d.status in (EXCLUDED, UNSPECIFIED):
             continue
+        if d.status != PENDING and st.session_state.get(_rc_key(fname, rid, 'skip')):
+            name_selections[(fname, rid)] = ['']  # 入力名があっても採用しない
+            continue
         if st.session_state.get(_rc_key(fname, rid, 'typed')):
             matched = match_typed_region_name(
                 st.session_state.get(_rc_key(fname, rid, 'typedtext'), ''),
                 analysis.get('labels', []))
             name_selections[(fname, rid)] = [matched] if matched else ['']
-            continue
-        if d.status != PENDING and st.session_state.get(_rc_key(fname, rid, 'skip')):
-            name_selections[(fname, rid)] = ['']
             continue
         if d.status == UNNAMED:
             if not d.adopted:
@@ -393,9 +394,9 @@ def apply_viewer_choice(fname, reg, kind, checked_names, idx=None, text='', type
         st.session_state[_rc_key(fname, reg_id, 'typedtext')] = ''
     elif kind == 'editnone':
         # 確定済み・無名の領域の「（領域選択しない）」。要選択の領域の `none` は他領域へ伝播して
-        # 立つことがあるので、別のキー `skip` に持つ（伝播されない）
+        # 立つことがあるので、別のキー `skip` に持つ（伝播されない）。入力名（`typed`）は保持し、
+        # 「領域選択しない」の間だけ採用されない（外すと入力名に戻る）
         st.session_state[_rc_key(fname, reg_id, 'skip')] = True
-        st.session_state[_rc_key(fname, reg_id, 'typed')] = False
     elif kind == 'editnoneoff':
         st.session_state[_rc_key(fname, reg_id, 'skip')] = False
     elif kind == 'typedtext':
