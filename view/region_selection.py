@@ -266,6 +266,11 @@ def gather_name_selections(fname, analysis):
                 analysis.get('labels', []))
             name_selections[(fname, reg['id'])] = [matched] if matched else ['']
             continue
+        if st.session_state.get(f"rc_{fname}_{reg['id']}_none") and not _is_choice_region(
+                reg, label, analysis, checked_names, excluded_names):
+            # 確定済み・無名の領域で「（領域選択しない）」を選んだ（採用しない印）
+            name_selections[(fname, reg['id'])] = ['']
+            continue
         if label is not None:
             # 無名領域は「特定」が既定ON（従来から自動で "no name" として採用していた
             # ため）。「領域一覧」で明示的にOFFにしたときだけ採用しない（['']=採用しない
@@ -292,6 +297,14 @@ def gather_name_selections(fname, analysis):
         if chosen:
             name_selections[(fname, reg['id'])] = chosen
     return name_selections
+
+
+def _is_choice_region(reg, unnamed_label, analysis, checked_names, excluded_names):
+    """この領域が、ユーザーが候補から選ぶ領域（要選択）かどうか。確定済み・無名の領域は False。"""
+    return (unnamed_label is None
+            and resolve_globally_decided_name(reg, checked_names) is None
+            and is_region_pending_selection(reg, checked_names)
+            and resolve_by_other_frames(reg, analysis, checked_names, excluded_names) is None)
 
 
 def normalize_typed_name(text):
@@ -333,6 +346,7 @@ def ensure_typed_defaults(fname, reg_id):
     """「領域名を入力」の状態（正本）を未設定なら初期化する（確定済み・無名の領域の名称変更用）。"""
     st.session_state.setdefault(_rc_key(fname, reg_id, 'typed'), False)
     st.session_state.setdefault(_rc_key(fname, reg_id, 'typedtext'), '')
+    st.session_state.setdefault(_rc_key(fname, reg_id, 'none'), False)
 
 
 def on_change_typed(fname, reg_id, n_cands):
@@ -340,6 +354,7 @@ def on_change_typed(fname, reg_id, n_cands):
     （他領域には伝播しない）。"""
     if not st.session_state.get(_rc_key(fname, reg_id, 'typed'), False):
         return
+    st.session_state[_rc_key(fname, reg_id, 'none')] = False
     for j in range(n_cands):
         st.session_state[_rc_key(fname, reg_id, j)] = False
     st.session_state[_rc_key(fname, reg_id, 'none')] = False
@@ -391,8 +406,14 @@ def apply_viewer_choice(fname, reg, kind, checked_names, idx=None, text='', type
     elif kind == 'typed':
         st.session_state[_rc_key(fname, reg_id, 'typed')] = True
         on_change_typed(fname, reg_id, len(cands))
-    elif kind == 'typedoff':
+    elif kind == 'typedoff':  # 確定済み・無名の領域で入力欄を空にした＝自動の名称に戻す
         st.session_state[_rc_key(fname, reg_id, 'typed')] = False
+        st.session_state[_rc_key(fname, reg_id, 'typedtext')] = ''
+    elif kind == 'editnone':  # 確定済み・無名の領域の「（領域選択しない）」（他領域へは伝播しない）
+        st.session_state[_rc_key(fname, reg_id, 'none')] = True
+        st.session_state[_rc_key(fname, reg_id, 'typed')] = False
+    elif kind == 'editnoneoff':
+        st.session_state[_rc_key(fname, reg_id, 'none')] = False
     elif kind == 'typedtext':
         st.session_state[_rc_key(fname, reg_id, 'typedtext')] = typed_text or ''
         st.session_state[_rc_key(fname, reg_id, 'typed')] = True
@@ -894,7 +915,7 @@ def render_region_confirmation_section(analyses, locked, action='抽出', file_p
     st.subheader("領域の確認")
     if show_all:
         st.caption(
-            "検出した領域を図面上で確認できます。確定した領域の名称も、図面の「領域名を入力」で変更できます。"
+            "各ファイルを開き、図面で領域の確認・選択・名称の入力を行います。確定した領域の名称も、図面の「領域名を入力」で変更できます。"
             f"「{SECTION_TITLE}」で除外した領域・特定をOFFにした領域は灰色で表示します。")
     else:
         st.caption(
@@ -904,22 +925,27 @@ def render_region_confirmation_section(analyses, locked, action='抽出', file_p
             f"選択しなかった領域は{action}対象から除外され、ここには表示されません。"
         )
 
-    def _needs_action(item):
+    def _needs_choice(item):
         _f, a, pend = item
-        return bool(a.get('error') or pend or (show_unnamed and unnamed_region_labels(a)))
+        return bool(pend)
 
     if show_all:
-        targets = sorted(targets, key=lambda it: (not _needs_action(it), it[0]))  # 要確認が先頭
-        if any(not _needs_action(it) for it in targets):
-            if st.toggle("要確認のファイルのみ表示", value=False, key="regconfirm_only_action"):
-                targets = [it for it in targets if _needs_action(it)]
+        n_choice = sum(1 for it in targets if _needs_choice(it))
+        if n_choice:
+            st.caption(f"選択の必要あり: {n_choice} ファイル")
+            if st.toggle("選択の必要ありのファイルのみ表示", value=False, key="regconfirm_only_action"):
+                targets = [it for it in targets if _needs_choice(it)]
 
     rendered_any = False
     for item in targets:
         fname, analysis, pending_regions = item
-        container = (st.expander(
-            f"{fname}（確定のみ）", expanded=bool(st.session_state.get(f"regprev_confirm_{fname}")))
-            if show_all and not _needs_action(item) else st.container())
+        if show_all:
+            suffix = "（エラー）" if analysis.get('error') else (
+                "（選択の必要あり）" if _needs_choice(item) else "（確定のみ）")
+            container = st.expander(
+                f"{fname}{suffix}", expanded=bool(st.session_state.get(f"regprev_confirm_{fname}")))
+        else:
+            container = st.container()
         if rendered_any and not show_all:
             st.divider()
         rendered_any = True
