@@ -546,7 +546,7 @@ def region_list_dataframe(candidate_names, values, allow_exclude):
 
 
 def render_global_region_names_section(candidate_names, locked, action='抽出', allow_exclude=False,
-                                       default_on_names=(), side_widget=None):
+                                       default_on_names=(), side_widget=None, show_select_all=False):
     """「領域一覧」セクション: `candidate_names`（呼び出し側が決める名称候補の
     一覧。表示順のまま使う）を表(st.data_editor)で表示し、領域名ごとに「特定」
     （`allow_exclude=True` のときはさらに「除外」）をON/OFFさせる
@@ -574,6 +574,9 @@ def render_global_region_names_section(candidate_names, locked, action='抽出',
 
     `side_widget`（引数なしの呼び出し可能オブジェクト、既定 None）: 渡すと表の右側の列で呼び出す
     （表と並べて置きたいオプションウィジェット用。2026-10-17）。None なら表だけを幅いっぱいに置く従来表示。
+
+    `show_select_all`（既定 False。DXF-extract-labels のみ True）: 表の上に「すべての領域名を特定にする」
+    ボタンを出し、全領域名の「特定」を ON にする（「除外」は変えない。結果表示中は無効）。
 
     `candidate_names` が空の場合は案内メッセージのみ表示する（面積条件〈config.py
     の area_ratio / group_area_ratio〉を満たす領域が1件も無かった、または
@@ -617,6 +620,14 @@ def render_global_region_names_section(candidate_names, locked, action='抽出',
         st.session_state.setdefault(f"grc_{name}", name in default_on)
         if allow_exclude:
             st.session_state.setdefault(f"gre_{name}", False)
+
+    # 正本だけを更新する。表は `region_list_editor_state()` が「正本が前回書いた値と違う」
+    # ことを検知して作り直す（外部クリアと同じ経路）
+    if show_select_all and st.button("すべての領域名を特定にする", key="grc_select_all_btn",
+                                     disabled=locked):
+        for name in candidate_names:
+            st.session_state[f"grc_{name}"] = True
+        invalidate_region_selection_confirmation()
 
     current = {
         name: (
