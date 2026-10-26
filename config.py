@@ -62,8 +62,8 @@ class RegionDetectionConfig:
     NAME_EXCLUDE_TERMS = ('NOTE', '☆', 'ACCESSORY CABLE', 'FLAT CABLE')
 
     # 1つの閉領域が単独でこの面積比（四捨五入した整数%）以上のとき抽出対象とします
-    # 既定値: 5（= 5%。図面枠面積比）
-    AREA_RATIO_PERCENT = 5
+    # 既定値: 4（= 4%。図面枠から図面情報枠を除いた面積〔用紙サイズ別の固定値〕に対する比）
+    AREA_RATIO_PERCENT = 4
 
     # 同じ名称の複数ピースを合算したとき、この面積比（四捨五入した整数%）以上なら
     # 抽出対象とします。第1図面で成立した名称は他図面でも面積不問で抽出します。

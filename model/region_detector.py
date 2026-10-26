@@ -61,9 +61,10 @@ DEFAULT_REGION_CONFIG = {
     'span_level_merge': False,  # 共線結合のレベルを「スパンを構成した線分だけ」の平均で
                                 # 算出する（既定はレベルクラスタ全体の平均）。レベル汚染
                                 # フォールバック（analyze_dxf_regions 4パス目）が True で使う。
-    'area_ratio': 0.05,         # 単独の領域の最小面積（枠面積比、整数%比較。v1.9.0で0.15から変更）
-    'group_area_ratio': 0.10,   # 同名複数ピースを合算した場合の最小合計面積（枠面積比、整数%比較）
-    'min_face_ratio': 0.005,    # 個々の閉領域として残す最小面積（枠面積比、ノイズ除去）
+    'area_ratio': 0.04,         # 単独の領域の最小面積（分母比〔下記 effective_frame_area〕、整数%比較。
+                                # 0.15→0.05（v1.9.0）→0.04（分母を用紙サイズ別の固定値にした変更と同時）
+    'group_area_ratio': 0.10,   # 同名複数ピースを合算した場合の最小合計面積（分母比、整数%比較）
+    'min_face_ratio': 0.005,    # 個々の閉領域として残す最小面積（分母比、ノイズ除去）
     'name_max_dist': 10.0,      # 名称ラベルの境界からの最大距離
     'horizontal_name_max_dist': 15.0,  # 回転図面の横エッジ近傍探索の最大距離（None=name_max_dist と同じ）
     'name_min_dist': 1.0,       # 名称ラベルの境界からの最小距離（線分上=0 を除外）
@@ -82,6 +83,40 @@ DEFAULT_REGION_CONFIG = {
                                  # 半角化してから行う（4節「全角/半角混在への対応」の鉄則）。
                                  # min_face_ratio によるノイズ下限は救済しない。
 }
+
+
+# 領域の面積比の分母（`frame_area`）: 用紙サイズ別の固定値
+# 図面枠の面積から図面情報枠（右下のタイトルブロック）の面積を引いた値を分母にする。
+# 情報枠の面積は領域になり得ないので、見た目の「図面の中で占める割合」に近づく。
+# 図面枠の寸法（CAD上の寸法。尺度の異なる用紙で図面枠の寸法が変わる）から表を引き、
+# **用紙を図面から読み取る処理や情報枠の検出は使わない**（情報枠の実寸は用紙によらず一定）。
+# 表に無い寸法の図面枠は従来どおり図面枠の面積。分母は1ページ分（1つの図面枠・1つの情報枠）で、
+# 1ファイルに複数ページがあっても合算しない。
+# 各行: (図面枠W, 図面枠H, 情報枠W, 情報枠H, 注記)。情報枠は新テンプレート 175×64、
+# 旧テンプレート 350×72（`ref_designator._INFO_FRAME_SIZE_*` と同じ寸法）。
+# 守るテスト: tests/regression/spec/test_paper_area_denominator.py
+PAPER_FRAME_TABLE = (
+    (385, 277, 175, 64, 'A3'),
+    (559, 400, 175, 64, 'A2'),
+    (796, 554, 175, 64, 'A1'),
+    (770, 554, 350, 72, '旧テンプレート'),
+    (1118, 800, 350, 72, '旧テンプレート'),
+)
+_PAPER_FRAME_TOL = 2.0      # 図面枠の寸法が表と一致するとみなす許容誤差
+
+
+def effective_frame_area(frame):
+    """領域の面積比の分母を返す。`frame` は (xl, xr, y0, y1)。
+
+    図面枠の寸法が `PAPER_FRAME_TABLE` のいずれかと許容誤差内で一致すれば
+    `W*H - 情報枠W*情報枠H`、一致しなければ図面枠の面積 `(xr-xl)*(y1-y0)`。
+    """
+    w = frame[1] - frame[0]
+    h = frame[3] - frame[2]
+    for pw, ph, iw, ih, _note in PAPER_FRAME_TABLE:
+        if abs(w - pw) <= _PAPER_FRAME_TOL and abs(h - ph) <= _PAPER_FRAME_TOL:
+            return float(pw * ph - iw * ih)
+    return w * h
 
 
 def _area_ratio_met(area, frame_area, ratio):
@@ -959,7 +994,7 @@ def _resolve_dangling_handles(dangling_branches, raw_lines, tol=0.5):
 
 
 def _detect_regions(RH, RV, frame, frame_area, cfg, circles=None, raw_lines=None):
-    """1つの図面枠内で、面積>=枠面積×area_ratio の閉領域を検出する。
+    """1つの図面枠内で、面積>=分母（frame_area）×area_ratio の閉領域を検出する。
 
     戻り値: (regions, dangling) のタプル。dangling は `_resolve_dangling_handles`
     の出力形式（枝＝連結成分ごとの attachment/handle/座標）。どの領域に関係する
@@ -2147,7 +2182,7 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
                 fallback_labels.append((clean_text, x, y))
             result['labels'] = fallback_labels
             return result
-        frame_area = (frames[0][1] - frames[0][0]) * (frames[0][3] - frames[0][2])
+        frame_area = effective_frame_area(frames[0])   # 用紙サイズ別の固定分母（図面枠−情報枠）
         result['frame_area'] = frame_area
 
         # 図面枠内ラベル（重複除去）
