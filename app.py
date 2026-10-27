@@ -24,7 +24,7 @@ from model.drawing_filter import (
 from config import region_detection_config
 from view import region_selection
 
-st.set_page_config(page_title="DXF Label Comparison", page_icon="🔍", layout="wide")
+st.set_page_config(page_title="DXF Cross Checker", page_icon="🔍", layout="wide")
 
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -149,7 +149,7 @@ def _render_intro():
         }
         </style>
     """, unsafe_allow_html=True)
-    st.title("DXF Label Comparison - 展開図-結線図比較")
+    st.title("DXF Cross Checker - 展開図-結線図比較")
     st.write(
         "展開接続図のDXFファイル(A)とUNIT内結線図のDXFファイル(B)からラベルを抽出し、"
         "ラベル（機器符号）を比較します。"

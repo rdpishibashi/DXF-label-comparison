@@ -1,7 +1,7 @@
 """1ファイル単位の領域検出・ラベル抽出（streamlit 非依存）。
 
 複数プロジェクトで共有するモジュール（primary: DXF-extract-labels。
-DXF-label-comparison にバイト一致のコピーがあり、同プロジェクトの
+DXF-cross-checker にバイト一致のコピーがあり、同プロジェクトの
 `tests/regression/spec/test_shared_files_identical_to_extract_labels.py`
 が一致を検証する）。変更は primary で行い、コピーへそのまま伝播すること。
 

@@ -2,7 +2,7 @@
 領域検出（矩形領域抽出）の設定ファイル
 
 複数プロジェクトで共有するファイル（primary: DXF-extract-labels。
-DXF-label-comparison にバイト一致のコピーがあり、同プロジェクトの
+DXF-cross-checker にバイト一致のコピーがあり、同プロジェクトの
 `tests/regression/spec/test_shared_files_identical_to_extract_labels.py`
 が一致を検証する）。設定値の変更は primary で行い、コピーへそのまま伝播すること。
 

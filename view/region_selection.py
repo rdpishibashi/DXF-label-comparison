@@ -2,7 +2,7 @@
 ファイル単位の抽出ループ（streamlit 依存のビュー層）。
 
 複数プロジェクトで共有するモジュール（primary: DXF-extract-labels。
-DXF-label-comparison にバイト一致のコピーがあり、同プロジェクトの
+DXF-cross-checker にバイト一致のコピーがあり、同プロジェクトの
 `tests/regression/spec/test_shared_files_identical_to_extract_labels.py`
 が一致を検証する）。変更は primary で行い、コピーへそのまま伝播すること。
 プロジェクト固有の事情（「領域一覧」に出す名称の範囲、キャプションの動詞、
@@ -14,7 +14,7 @@ DXF-label-comparison にバイト一致のコピーがあり、同プロジェ�
   - `region_selection_confirmed`: 「領域選択を完了」済みか
   - `grc_<名称>`: 「領域一覧」の「特定」チェック状態
   - `gre_<名称>`: 「領域一覧」の「除外」チェック状態（v3.11.0新設。
-    `allow_exclude=False` の呼び出し側〈DXF-label-comparison〉では列自体を
+    `allow_exclude=False` の呼び出し側〈DXF-cross-checker〉では列自体を
     表示しないため、常に空）
   - `region_list_editor`: 「領域一覧」表のウィジェット状態（key用ver・元データ・
     最後に書いたチェック状態）。チェック操作で表を作り直さないための固定用
@@ -352,7 +352,7 @@ def render_global_region_names_section(candidate_names, locked, action='抽出',
     （境界線上を含む）の内側にあるラベルを出力結果から完全に取り除く。
     「特定」の有無とは無関係にラベル自体が出力から消える。同じ領域名で「特定」
     「除外」の両方をONにした場合は「除外」が優先される（2026-10-08ユーザー決定）。
-    `allow_exclude=False`（例: DXF-label-comparison）のときは「除外」列自体を
+    `allow_exclude=False`（例: DXF-cross-checker）のときは「除外」列自体を
     表示しない。
 
     `default_on_names`: 「特定」の既定値をONにする名称（名称のない領域の表示名。従来から

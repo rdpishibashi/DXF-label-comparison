@@ -1,7 +1,7 @@
 """領域の分類（streamlit 非依存）。
 
 複数プロジェクトで共有するモジュール（primary: DXF-extract-labels。
-DXF-label-comparison・HostPL-comparer にバイト一致のコピーがあり、各プロジェクトの
+DXF-cross-checker・HostPL-comparer にバイト一致のコピーがあり、各プロジェクトの
 `tests/regression/spec/test_shared_files_identical_to_extract_labels.py`
 が一致を検証する）。変更は primary で行い、コピーへそのまま伝播すること。
 
