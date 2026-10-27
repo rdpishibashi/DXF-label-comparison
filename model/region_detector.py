@@ -197,6 +197,7 @@ def _collect_region_geometry(doc, cfg, check_layer=True):
         frame_lines = []
         region_lines = []
         region_lines_lp = []  # LWPOLYLINE 由来の境界線（LINE と分離して収集）
+        lp_rects = []         # 閉じた軸平行の長方形（4頂点）の LWPOLYLINE: (x0, x1, y0, y1, handle)
         label_entities = []
         connection_points = []
 
@@ -226,6 +227,15 @@ def _collect_region_geometry(doc, cfg, check_layer=True):
             if n < 2:
                 return
             handle = e.dxf.handle or owner_handle
+            if e.closed and n == 4 and all(abs(p[2]) <= 1e-6 for p in pts):
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                if all(abs(pts[i][0] - pts[(i + 1) % 4][0]) < 0.05 or abs(pts[i][1] - pts[(i + 1) % 4][1]) < 0.05
+                       for i in range(4)):
+                    # 閉じた長方形は、面積によって境界線にするか単独の候補面にするかを
+                    # 呼び出し側（`analyze_dxf_regions`）が分ける。ここでは辺に分解しない。
+                    lp_rects.append((min(xs), max(xs), min(ys), max(ys), handle))
+                    return
             close_range = n if e.closed else n - 1
             for i in range(close_range):
                 p0 = pts[i]
@@ -266,7 +276,7 @@ def _collect_region_geometry(doc, cfg, check_layer=True):
                 except Exception:
                     pass
 
-        return frame_lines, region_lines, region_lines_lp, label_entities, connection_points
+        return frame_lines, region_lines, region_lines_lp, label_entities, connection_points, lp_rects
 
     return select_layout_result(doc, collect_from_layout, is_empty=lambda r: not any(r))
 
@@ -1136,6 +1146,16 @@ def _detect_regions(RH, RV, frame, frame_area, cfg, circles=None, raw_lines=None
             continue
         seen.add(bb)
         regions.append({'polygon': f, 'area': a})
+    for (x0, x1, ry0, ry1) in cfg.get('_extra_faces') or ():
+        # 小さい閉じた箱（LWPOLYLINE）を単独の候補面として加える（結合した外形は作らない）
+        if not (xl - m <= (x0 + x1) / 2 <= xr + m and y0 - m <= (ry0 + ry1) / 2 <= y1 + m):
+            continue
+        a = (x1 - x0) * (ry1 - ry0)
+        bb = (round(x0), round(x1), round(ry0), round(ry1))
+        if a < thr or bb in seen:
+            continue
+        seen.add(bb)
+        regions.append({'polygon': [(x0, ry0), (x1, ry0), (x1, ry1), (x0, ry1)], 'area': a})
     dangling_resolved = _resolve_dangling_handles(dangling, raw_lines or [])
     return regions, dangling_resolved
 
@@ -1836,6 +1856,13 @@ def _detect_complement_pairs(regions, tol=1.0):
     return results
 
 
+def _has_diagonal_edge(poly, tol=1.0):
+    """ポリゴンに軸平行でない辺（dx・dy がともに tol を超える）があるか。"""
+    n = len(poly)
+    return any(abs(poly[i][0] - poly[(i + 1) % n][0]) > tol and abs(poly[i][1] - poly[(i + 1) % n][1]) > tol
+               for i in range(n))
+
+
 def _extract_complement_subpolygons(large_corners, small_corners, tol=1.0):
     """補完面 large の境界を辿り、small に含まれない追加頂点の連続区間を切り出して
     サブ領域ポリゴン（リスト of リスト[(x,y)]）を返す。
@@ -1931,6 +1958,8 @@ def _resolve_complement_faces(regions, frame_area, next_id=None):
 
         sub_polys = _extract_complement_subpolygons(comp_face['corners'], base_face['corners'])
         for sub_poly in sub_polys:
+            if _has_diagonal_edge(sub_poly):
+                continue   # 始点へ戻る辺が斜めになる部分ポリゴンは、元の図面に無い線を含むので領域にしない
             sub_area = _polygon_area(sub_poly)
             new_regions.append({
                 'id': next_id,
@@ -2245,7 +2274,7 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
     try:
         doc = ezdxf.readfile(dxf_file)
         msp = doc.modelspace()
-        frame_lines, region_lines, region_lines_lp, label_entities, connection_points = \
+        frame_lines, region_lines, region_lines_lp, label_entities, connection_points, lp_rects = \
             _collect_region_geometry(doc, cfg, check_layer=True)
 
         frames = detect_drawing_frames(frame_lines, cfg['snap'])
@@ -2260,7 +2289,7 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
         # 図形・文字を領域境界候補やラベルとして拾わないため
         # （common_utils.is_invisibleのdocstring、Tools/CLAUDE.md参照）。
         if not frames:
-            fb_frame_lines, _, _, _, _ = _collect_region_geometry(doc, cfg, check_layer=False)
+            fb_frame_lines, _, _, _, _, _ = _collect_region_geometry(doc, cfg, check_layer=False)
             fb_frames = detect_drawing_frames(fb_frame_lines, cfg['snap'])
             if fb_frames:
                 frames = fb_frames
@@ -2398,8 +2427,22 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
         # よって LINE-only の正しい検出を保持したまま、LWPOLYLINE追加でのみ
         # 見つかる新規候補（`EFEM UPPER`等）だけを追加できる。
         zero_fis = _zero_hit_frame_indices(frame_cands, gate_ratio)
-        if zero_fis and region_lines_lp:
-            lines_for_detection = region_lines + region_lines_lp
+        if zero_fis and (region_lines_lp or lp_rects):
+            # 閉じた長方形の LWPOLYLINE は、面積条件（area_ratio）を満たすものだけ境界線の辺に分解する。
+            # それ未満の小さい箱（部品の端子箱・コネクタなど）は辺を共有グラフに入れず、単独の
+            # 候補面にする（隣り合う箱が結合した外形や、箱の辺を共有する面を領域候補にしないため。
+            # `EE6888-631-01A.dxf` の CNJ1 部品）。
+            rect_lines = []
+            small_rects = []
+            for (x0, x1, ry0, ry1, rh) in lp_rects:
+                if _area_ratio_met((x1 - x0) * (ry1 - ry0), frame_area, area_ratio):
+                    rect_lines += [((x0, ry0), (x1, ry0), rh), ((x1, ry0), (x1, ry1), rh),
+                                   ((x1, ry1), (x0, ry1), rh), ((x0, ry1), (x0, ry0), rh)]
+                else:
+                    small_rects.append((x0, x1, ry0, ry1))
+            if small_rects:
+                cfg['_extra_faces'] = small_rects
+            lines_for_detection = region_lines + region_lines_lp + rect_lines
             sub_frames = [frames[fi] for fi in zero_fis]
             fc2, dg2 = _run_region_detection(
                 lines_for_detection, cfg, sub_frames, frame_area, frame_labels,
