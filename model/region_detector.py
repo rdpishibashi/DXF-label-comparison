@@ -2442,8 +2442,21 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
                 frame_area, frame_labels, connection_points, rotated_edge_roles)
             minor_cands = [_merge_cands_lists(frame_cands[fi], comp_cands[fi])
                            for fi in range(len(frame_cands))]
-            result['minor_regions'] = _detect_minor_regions(
+            minors = _detect_minor_regions(
                 minor_cands, regions, frame_area, frame_labels, cfg, area_ratio)
+            # 対辺補完で閉じた四角形のうち面積条件（area_ratio）を満たすものは、他で採用された名称との
+            # 一致を待たず通常領域として扱う（2026-10-27 ユーザー決定。`EE3273-039-06B` の `CN-IF2-1`）。
+            # 外側の領域が持つ同名の候補は、重なり判定（`_remove_overlap_claimed_candidates`）で外れる。
+            promoted = [m for m in minors if _area_ratio_met(m['area'], frame_area, area_ratio)]
+            if promoted:
+                for r in regions:
+                    r['_tier_by_text'] = ({r['default_name']: r['default_name_tier']}
+                                          if r['default_name'] else {})
+                regions.extend(promoted)
+                _remove_overlap_claimed_candidates(regions)
+                promoted_ids = {m['id'] for m in promoted}
+                minors = [m for m in minors if m['id'] not in promoted_ids]
+            result['minor_regions'] = minors
 
         del doc, msp
         gc.collect()

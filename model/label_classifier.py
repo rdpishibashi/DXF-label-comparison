@@ -388,6 +388,15 @@ _SHAPE_ADDED_SPECS = ('added_desig:Dnnnan', 'added_desig:DCnnan')
 TB_PREFIX = 'TB'
 
 
+# `CN` で始まり空白を含むラベルは、`I/F` を含めば領域名候補（コネクタ基板名。例 `CN I/F B.D TYPE2`）、
+# 含まなければ機器符号候補（コネクタ。例 `CN CS`・`CN PANEL1`・`CN11 CN12`）にする（2026-10-27 ユーザー指定。
+# `FORCED_REGION_NAME_PATTERNS` の後に判定するので `CN B.D-1B` のようにハイフンを含むものは領域名候補のまま。
+# 戻すときはこの3つの定義と classify_label() の該当2行を削除する）。
+CN_PREFIX = 'CN'
+CN_REGION_NAME_TERM = 'I/F'
+_WHITESPACE = re.compile(r'\s')
+
+
 def _is_non_designator_shape(judgment: str) -> bool:
     if not any(rx.match(judgment) for rx in NON_DESIGNATOR_PATTERNS):
         return False
@@ -407,6 +416,8 @@ def classify_label(text: str) -> str:
       1a. `OTHER_PATTERNS`（A・C・L・Q・U・F 以外の英大文字1字+数字1〜2桁。例 `R10`・`N24`、および `AWG`+数字）→ `OTHER`
       1b. `FORCED_REGION_NAME_PATTERNS`（`CN`+ハイフンを含む・英字+数字2桁・`A`+数字1桁。
           例 `CN-IF2-1`・`THM01`・`CNE06`・`A1`）→ `REGION_NAME`（追加機器符号に一致しても）
+      1b2. `CN` で始まり空白を含む: `I/F` を含む → `REGION_NAME`（例 `CN I/F B.D TYPE2`）、
+          含まない → `DESIGNATOR`（例 `CN CS`・`CN PANEL1`・`CN11 CN12`）。判定は括弧より前の部分で行う
       1c. `NON_DESIGNATOR_PATTERNS`（英字+数字+英字+数字 の形。例 `DC19A4`）→ `REGION_NAME`
           （ただし `CN.*`・`DIO.*` 等の追加機器符号に一致するものは機器符号のまま）
       2. 英字のみ以外の候補パターン（`PATTERN_CATEGORIES`）に一致 → `DESIGNATOR`
@@ -431,6 +442,8 @@ def classify_label(text: str) -> str:
         return OTHER
     if any(rx.match(judgment) for rx in FORCED_REGION_NAME_PATTERNS):
         return REGION_NAME
+    if judgment.startswith(CN_PREFIX) and _WHITESPACE.search(judgment):
+        return REGION_NAME if CN_REGION_NAME_TERM in judgment else DESIGNATOR
     if _is_non_designator_shape(judgment):
         return REGION_NAME
     if _NON_LETTERS_CANDIDATE.match(judgment):
