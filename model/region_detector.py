@@ -2319,8 +2319,6 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
             seen.add(key)
             frame_labels.append((clean_text, x, y))
         result['labels'] = frame_labels
-        if cfg.get('local_rotation'):
-            cfg['_label_angles'] = label_angles   # 領域ごとの回転判定用（`_local_rotated_edge_roles()`）
 
         area_ratio = cfg['area_ratio']                      # 単独領域の閾値（整数%比較）
         group_ratio = cfg.get('group_area_ratio', 0.10)      # 同名複数ピース合算の閾値（整数%比較）
@@ -2339,6 +2337,11 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
         gate_ratio = max(area_ratio, 0.15)
         rotated = _is_globally_rotated(label_entities)
         rotated_edge_roles = _rotated_edge_roles(label_entities) if rotated else None
+        if cfg.get('local_rotation') and not rotated:
+            # 領域ごとの回転判定用（`_local_rotated_edge_roles()`）。図面全体が回転している場合は
+            # 従来の回転図面の処理に任せ、局所回転の判定は使わない（合体親の名称探索を飛ばすと
+            # `DE3527-553-10E` など10ファイルで合体親領域が消える）。
+            cfg['_label_angles'] = label_angles
 
         # 1) LINE のみで領域検出を試みる
         lines_for_detection = region_lines
