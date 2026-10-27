@@ -517,6 +517,60 @@ def _merge_collinear(items, level_tol, bridge=True, circles=None, circle_band=2.
     return out
 
 
+# デバイスの手前で横線が途切れる長さの上限（`EE6892-610-01B.dxf` の実測 4.6〜5.7）。これより離れた線は繋がない
+_DEVICE_LEAD_MAX = 6.0
+
+
+def _device_gap_bridges(Hf, Vf, Hm, tol=0.5):
+    """デバイス（4辺が揃った閉じた長方形）が横線を覆い隠している隙間を、横線で補う `[(level, x0, x1), ...]`。
+
+    長方形の左右の辺（同じ y 範囲の縦線2本）の外側に、同じレベルの横線の端があり（左の線の右端が左辺の x まで、
+    右の線の左端が右辺の x から、`_DEVICE_LEAD_MAX` 以内）、そのレベルが長方形の上辺と下辺の間にあるときだけ、
+    左の線の右端から右の線の左端までを補う（デバイスの手前の短い引き込み線の途切れも含む）。
+    長方形は上辺・下辺の横線が左右の辺の間を覆っていることも確かめる（4辺が揃っていなければデバイスと見なさない）。
+    図面の一部が90°回転していて、仕切り線がデバイスで隠れる場合（`EE6892-610-01B.dxf` の `A8F`・`A90`・`A91`・
+    `BB4`）用。`bridge_horizontal_gaps`（回転図面全体で横線の隙間を橋渡しする）より限定的で、
+    通常の領域検出には使わない（`cfg['bridge_device_gaps']`）。"""
+    
+    by_extent = {}
+    for (x, y0, y1) in Vf:
+        by_extent.setdefault((round(y0), round(y1)), []).append((x, y0, y1))
+
+    def covered(level, a, b):
+        return any(abs(hy - level) <= tol and h0 <= a + tol and h1 >= b - tol for (hy, h0, h1) in Hf)
+
+    bridges = []
+    for group in by_extent.values():
+        group = sorted(group)
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                xl, ylo, yhi = group[i]
+                xr, ylo2, yhi2 = group[j]
+                if xr - xl <= tol or abs(ylo - ylo2) > tol or abs(yhi - yhi2) > tol:
+                    continue
+                if not (covered(ylo, xl, xr) and covered(yhi, xl, xr)):
+                    continue
+                reach = min(yhi - ylo, _DEVICE_LEAD_MAX)
+                lefts = [(lv, b) for (lv, _a, b) in Hm if ylo + tol < lv < yhi - tol and -tol <= xl - b <= reach]
+                rights = [(lv, a) for (lv, a, _b) in Hm if ylo + tol < lv < yhi - tol and -tol <= a - xr <= reach]
+                for lv, b in lefts:
+                    for lv2, a in rights:
+                        if abs(lv - lv2) <= tol:
+                            bridges.append(((lv + lv2) / 2.0, b, a))
+    if not bridges:
+        return []
+    # 補った後の横線（つながった1本）の両端が、どちらも縦の境界線に届いているときだけ採用する
+    # （領域の仕切り線がデバイスで隠れている場合。隣り合う別々の領域の間の横線を繋がないため）。
+    def _on_vertical(x, level):
+        return any(abs(vx - x) <= tol and vy0 - tol <= level <= vy1 + tol for (vx, vy0, vy1) in Vf)
+
+    runs = _merge_collinear(Hm + bridges, tol, bridge=False)
+    valid = [(lv, a, b) for (lv, a, b) in bridges
+             if any(abs(rl - lv) <= tol and ra <= a + tol and rb >= b - tol
+                    and _on_vertical(ra, rl) and _on_vertical(rb, rl) for (rl, ra, rb) in runs)]
+    return valid
+
+
 def _raw_axis_segments(lines, frame, margin, axis_tol=0.05, min_len=0.3):
     """図面枠内の軸平行線分を、長さを問わず `(raw_H[(y,x0,x1)], raw_V[(x,y0,y1)])` で返す
     （対辺補完で「角から線が出ているか」の証拠にだけ使う。`_split_axis_aligned()` は長さ
@@ -1041,6 +1095,10 @@ def _detect_regions(RH, RV, frame, frame_area, cfg, circles=None, raw_lines=None
     Vm = _merge_collinear(Vf, mtol, bridge=bridge_v, circles=fcircles, circle_band=cband,
                           h_endpoints=h_endpoints, corner_tol=ctol,
                           span_levels=span_levels)
+    if cfg.get('bridge_device_gaps'):
+        extra = _device_gap_bridges(Hf, Vf, Hm)
+        if extra:
+            Hm = _merge_collinear(Hm + extra, mtol, bridge=False)
     if cfg.get('complete_rectangles'):
         # 対辺補完（名称採用候補を作る追加パス専用。`_complete_rectangles()` 参照）。
         raw_h, raw_v = _raw_axis_segments(raw_lines or [], frame, m)
@@ -1301,6 +1359,7 @@ def region_name_candidates(
     horizontal_fallback: bool = False,
     horizontal_max_dist: float | None = None,
     horizontal_only: bool = False,
+    label_angles: dict | None = None,
 ) -> tuple[list[tuple[float, str]], dict[str, int]]:
     """領域名候補ラベルを優先順位（Tier）→距離順に返す（テキスト重複除去）。
 
@@ -1373,6 +1432,20 @@ def region_name_candidates(
                 cand.append((d, c, t))
         return cand
 
+    if not rotated_edge_roles and label_angles and not horizontal_only:
+        # 図面全体は回転していなくても、図面の一部（この領域）だけが回転して描かれていることがある
+        # （`EE6892-610-01B.dxf`）。領域内のラベルの過半が90°回転していて、かつ回転図面の辺（下端相当・
+        # 上端相当の縦エッジ）の最近傍ラベルが、通常の辺（下辺・上辺）の最近傍ラベルより近いときだけ、
+        # 回転図面と同じ辺の役割にする（図面全体を含む大きい領域が、通常の下辺の名称 `RACK` を失わないため）。
+        local_roles = _local_rotated_edge_roles(polygon, labels, label_angles)
+        if local_roles:
+            rot_edges = [e for side in local_roles for e in _vertical_edges_at_extreme(polygon, side)]
+            normal_edges = _bottom_edges(polygon) + _top_edges(polygon) + _notch_bottom_edges(polygon)
+            rot_d = [d for d, _c, _t in _scan(rot_edges, _dist_and_center_to_vertical_edge, True)] if rot_edges else []
+            nor_d = [d for d, _c, _t in _scan(normal_edges, _dist_and_center_to_bottom_edge, True)] if normal_edges else []
+            if rot_d and (not nor_d or min(rot_d) < min(nor_d)):
+                rotated_edge_roles = local_roles
+
     if rotated_edge_roles:
         tier1_side, tier2_side = rotated_edge_roles
         tier1_edges = _vertical_edges_at_extreme(polygon, tier1_side)
@@ -1422,6 +1495,38 @@ def region_name_candidates(
 # ============================================================
 # 8. 図面回転判定（90°回転対応）
 # ============================================================
+
+_LOCAL_ROTATION_MIN_LABELS = 5   # 領域内のラベルがこれ未満なら回転とみなさない（偶然の1〜2個で辺の役割を変えない）
+
+
+def _local_rotated_edge_roles(polygon, labels, label_angles, threshold=0.5):
+    """領域内のラベルの過半が±90°回転していれば、`_rotated_edge_roles()` と同じ形
+    `(下端相当の側, 上端相当の側)` を返す（そうでなければ None）。
+
+    `label_angles` は `{(テキスト, round(x,1), round(y,1)): 角度}` で、`analyze_dxf_regions()` が
+    `cfg['local_rotation']` のときだけ作る。回転方向と辺の対応は `_rotated_edge_roles()` と同じ
+    （+90°多数派 → 下端相当=右端・上端相当=左端、-90°多数派 → 左右が逆）。"""
+    total = plus = minus = 0
+    for (t, x, y) in labels:
+        if not _point_in_polygon((x, y), polygon):
+            continue
+        ang = label_angles.get((t, round(x, 1), round(y, 1)))
+        if ang is None:
+            continue
+        total += 1
+        ang = ((ang + 180.0) % 360.0) - 180.0
+        if 80.0 <= ang <= 100.0:
+            plus += 1
+        elif -100.0 <= ang <= -80.0:
+            minus += 1
+    if total < _LOCAL_ROTATION_MIN_LABELS:
+        return None
+    if plus / total >= threshold:
+        return ('right', 'left')
+    if minus / total >= threshold:
+        return ('left', 'right')
+    return None
+
 
 def _label_rotation_angle(entity):
     """ラベルエンティティの実効回転角(度, 0-180で正規化前)を返す。
@@ -1552,6 +1657,7 @@ def _run_region_detection(lines, det_cfg, frames, frame_area, frame_labels,
                 max_dist=det_cfg['name_max_dist'], min_dist=det_cfg['name_min_dist'],
                 min_letters=det_cfg['name_min_letters'],
                 rotated_edge_roles=rotated_edge_roles,
+                label_angles=det_cfg.get('_label_angles'),
                 horizontal_fallback=_area_ratio_met(
                     reg['area'], frame_area, det_cfg['area_ratio']),
                 horizontal_max_dist=det_cfg.get('horizontal_name_max_dist'),
@@ -2067,9 +2173,15 @@ def _resolve_union_parents(regions, labels=None, cfg=None):
                 and regions[i].get('default_name')
                 and regions[i].get('frame', 0) == parent_frame
             } | parent_claimed_by_frame[parent_frame]
-            new_cands, new_tiers = _name_union_parent(
-                parent, children, labels, effective_cfg,
-                exclude_names=same_frame_names)
+            angles = effective_cfg.get('_label_angles')
+            if angles and _local_rotated_edge_roles(parent['polygon'], labels, angles):
+                # 図面の一部が回転している領域では、底辺中央近接の名称探索は意味を持たない
+                # （回転した図面の底辺は縦の辺。`EE6892-610-01B.dxf`）。結合親は名称を持たず除去される。
+                new_cands, new_tiers = [], {}
+            else:
+                new_cands, new_tiers = _name_union_parent(
+                    parent, children, labels, effective_cfg,
+                    exclude_names=same_frame_names)
             if new_cands:
                 # 未採用ラベルが見つかった → 親を残して名称を更新
                 parent['name_candidates'] = new_cands
@@ -2126,6 +2238,8 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
     cfg = dict(DEFAULT_REGION_CONFIG)
     if config:
         cfg.update(config)
+    if cfg.get('local_rotation'):
+        cfg.setdefault('bridge_device_gaps', True)   # 図面の一部が回転していてデバイスが仕切り線を隠す場合
     result = {'frames': [], 'frame_area': 0.0, 'labels': [], 'regions': [],
               'minor_regions': [], 'error': None}
     try:
@@ -2188,6 +2302,7 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
         # 図面枠内ラベル（重複除去）
         seen = set()
         frame_labels = []
+        label_angles = {}
         for it in label_entities:
             _, clean_text, (x, y) = extract_text_from_entity(it)
             if not clean_text:
@@ -2197,11 +2312,15 @@ def analyze_dxf_regions(dxf_file: str, config: dict | None = None) -> dict:
             if not in_frame:
                 continue
             key = (clean_text, round(x, 1), round(y, 1))
+            if cfg.get('local_rotation'):
+                label_angles[key] = _label_rotation_angle(it)
             if key in seen:
                 continue
             seen.add(key)
             frame_labels.append((clean_text, x, y))
         result['labels'] = frame_labels
+        if cfg.get('local_rotation'):
+            cfg['_label_angles'] = label_angles   # 領域ごとの回転判定用（`_local_rotated_edge_roles()`）
 
         area_ratio = cfg['area_ratio']                      # 単独領域の閾値（整数%比較）
         group_ratio = cfg.get('group_area_ratio', 0.10)      # 同名複数ピース合算の閾値（整数%比較）

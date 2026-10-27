@@ -83,7 +83,7 @@ def matched_pattern_name(judgment: str) -> Optional[str]:
 
 _COMMON_NOUNS = {
     'ABORT', 'ACCESSORY', 'ALARM', 'ANNEAL', 'ANODE', 'AUTO', 'AUTOSTART',
-    'BRAKE', 'BUSY', 'BUZZER', 'BYPASS', 'CATHODE', 'CHAMBER', 'CHANGE',
+    'BRAKE', 'BUSY', 'BUZZER', 'BYPASS', 'CHAMBER', 'CHANGE',
     'CHILLER', 'CIRCUIT', 'CLOSE', 'COLD', 'CONTACT', 'CONTROL',
     'CONTROLLER', 'COVER', 'CPU', 'DATA', 'DETECT', 'DEVICENET', 'DRAIN',
     'ENABLE', 'ENCODER', 'ETHERCAT', 'ETHERNET', 'EXHAUST', 'EXTEND',
